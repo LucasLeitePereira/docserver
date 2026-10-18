@@ -1,4 +1,4 @@
-"""Ponto de entrada da CLI: ingest, search, stats, serve."""
+"""Ponto de entrada da CLI: ingest, watch, search, stats, serve."""
 
 from __future__ import annotations
 
@@ -13,11 +13,75 @@ DOCS_FONTE_PADRAO = Path("docs-fonte")
 DOCS_NORMALIZADO_PADRAO = Path("docs-normalizado")
 INDICE_PADRAO = "data/indice.db"
 
+# `server-mcp` não aceita caminhos: usa sempre os do próprio projeto, independente do
+# diretório de onde o comando é executado (instalação editável, layout src/).
+RAIZ_PROJETO = Path(__file__).resolve().parents[2]
+INDICE_FIXO = RAIZ_PROJETO / "data" / "indice.db"
+DOCS_NORMALIZADO_FIXO = RAIZ_PROJETO / "docs-normalizado"
+PORTA_SERVER_MCP = 8765
+
 MIN_CARACTERES_SUSPEITO = 20
+
+MENSAGEM_SEM_RESULTADOS = (
+    "Nenhum trecho relevante encontrado. Tente reformular a consulta "
+    "(termo técnico exato ou pergunta em linguagem natural), restrinja a um "
+    "documento específico com o parâmetro documento, ou use listar_documentos "
+    "para ver o que existe."
+)
+
+
+class ErroIngestao(Exception):
+    """A ingestão foi abortada antes de alterar docs-normalizado ou o índice."""
 
 
 def _deve_ignorar(caminho: Path) -> bool:
     return caminho.name.startswith(".") or caminho.name.startswith("~$")
+
+
+def validar_docs_fonte(docs_fonte: Path) -> None:
+    """Um `--docs-fonte` inexistente (erro de digitação, cwd errado) faria o `rglob`
+    devolver nada e a ingestão apagar tudo como órfão — nunca seguir nesse caso."""
+    if not docs_fonte.is_dir():
+        raise ErroIngestao(
+            f"pasta de documentos de origem não encontrada: {docs_fonte.resolve()}. "
+            "Confira o --docs-fonte ou o diretório de onde o comando foi executado."
+        )
+
+
+def _remover_gerados(docs_normalizado: Path, manter: set[Path]) -> tuple[list[str], list[str]]:
+    """Apaga de docs_normalizado os `.md` gerados pelo docserver que não estão em
+    `manter`. Arquivos que não vieram do docserver são preservados. Devolve
+    (removidos, preservados)."""
+    removidos: list[str] = []
+    preservados: list[str] = []
+    if not docs_normalizado.exists():
+        return removidos, preservados
+    for arquivo in sorted(p for p in docs_normalizado.rglob("*.md") if p.is_file()):
+        if arquivo.resolve() in manter:
+            continue
+        if extract.gerado_pelo_docserver(arquivo):
+            arquivo.unlink()
+            removidos.append(str(arquivo))
+        else:
+            preservados.append(str(arquivo))
+    for pasta in sorted((p for p in docs_normalizado.rglob("*") if p.is_dir()), reverse=True):
+        try:
+            pasta.rmdir()
+        except OSError:
+            pass
+    return removidos, preservados
+
+
+def limpar_saidas(docs_normalizado: Path, caminho_indice: str) -> list[str]:
+    """`ingest --limpar`: remove só o que o docserver gerou e esvazia o índice."""
+    removidos, _ = _remover_gerados(docs_normalizado, manter=set())
+    if Path(caminho_indice).exists():
+        conexao = index.criar_indice(caminho_indice)
+        try:
+            index.limpar_indice(conexao)
+        finally:
+            conexao.close()
+    return removidos
 
 
 def executar_ingestao(
@@ -25,9 +89,14 @@ def executar_ingestao(
     docs_normalizado: Path,
     caminho_indice: str,
     sem_embeddings: bool = False,
-    embeddar_passagem_fn=None,
+    embeddar_passagens_fn=None,
     nome_modelo: str | None = None,
+    forcar: bool = False,
 ) -> dict:
+    """Pipeline completo. Levanta `ErroIngestao` — sem tocar em docs-normalizado nem
+    no índice — se `docs_fonte` não existe, ou (a menos que `forcar`) se não há nenhum
+    arquivo suportado ou se o resultado esvaziaria um índice que tinha conteúdo."""
+    validar_docs_fonte(docs_fonte)
     inicio = time.perf_counter()
     relatorio = {
         "processados": 0,
@@ -36,15 +105,36 @@ def executar_ingestao(
         "falhas": [],
         "suspeitos": [],
         "removidos": [],
+        "preservados": [],
     }
 
-    todos_chunks: list[dict] = []
-    gerados: set[Path] = set()
+    suportados: list[Path] = []
     for caminho in sorted(p for p in docs_fonte.rglob("*") if p.is_file()):
         if _deve_ignorar(caminho):
             continue
         if caminho.suffix.lower() not in extract.EXTRATORES:
             relatorio["ignorados"].append(str(caminho))
+            continue
+        suportados.append(caminho)
+
+    if not suportados and not forcar:
+        raise ErroIngestao(
+            f"nenhum arquivo em formato suportado em {docs_fonte.resolve()}. "
+            "Nada foi alterado; use --forcar se a intenção é mesmo esvaziar o índice."
+        )
+
+    todos_chunks: list[dict] = []
+    gerados: set[Path] = set()
+    destinos: dict[str, Path] = {}
+    for caminho in suportados:
+        destino = extract.caminho_normalizado_para(caminho, docs_fonte, docs_normalizado)
+        # em sistemas de arquivos que ignoram maiúsculas, `Guia.md` e `guia.md` de
+        # pastas espelhadas cairiam no mesmo arquivo — o segundo sobrescreveria o primeiro.
+        chave = str(destino.resolve()).casefold()
+        if chave in destinos:
+            relatorio["falhas"].append(
+                (str(caminho), f"colide com {destinos[chave]} no mesmo arquivo normalizado ({destino})")
+            )
             continue
         try:
             caminho_normalizado_arquivo = extract.normalizar(caminho, docs_fonte, docs_normalizado)
@@ -52,6 +142,7 @@ def executar_ingestao(
             relatorio["falhas"].append((str(caminho), str(erro)))
             continue
 
+        destinos[chave] = caminho
         gerados.add(caminho_normalizado_arquivo.resolve())
         relatorio["processados"] += 1
         conteudo = caminho_normalizado_arquivo.read_text(encoding="utf-8")
@@ -59,25 +150,23 @@ def executar_ingestao(
         if len(corpo.strip()) < MIN_CARACTERES_SUSPEITO:
             relatorio["suspeitos"].append(str(caminho))
 
-        todos_chunks.extend(chunk.chunkar_arquivo(caminho_normalizado_arquivo))
+        todos_chunks.extend(chunk.chunkar_arquivo(caminho_normalizado_arquivo, docs_normalizado))
+
+    if not todos_chunks and not forcar and index.contar_chunks(caminho_indice) > 0:
+        raise ErroIngestao(
+            "a ingestão não gerou nenhum chunk e substituiria um índice que tem conteúdo. "
+            "Índice e docs-normalizado foram mantidos; use --forcar se a intenção é mesmo esvaziá-lo."
+        )
 
     # arquivos normalizados cuja fonte original sumiu (foi apagada, renomeada, ou
     # passou a falhar na extração) não devem continuar servíveis nem aparecer na
     # listagem — é exatamente o que causava respostas misturando documentos.
-    for orfao in sorted(p for p in docs_normalizado.rglob("*.md") if p.is_file()):
-        if orfao.resolve() not in gerados:
-            orfao.unlink()
-            relatorio["removidos"].append(str(orfao))
-    for pasta in sorted((p for p in docs_normalizado.rglob("*") if p.is_dir()), reverse=True):
-        try:
-            pasta.rmdir()
-        except OSError:
-            pass
+    relatorio["removidos"], relatorio["preservados"] = _remover_gerados(docs_normalizado, gerados)
 
     embeddings = None
     if not sem_embeddings and todos_chunks:
-        calcular = embeddar_passagem_fn or embed.embeddar_passagem
-        embeddings = [calcular(c) for c in todos_chunks]
+        calcular = embeddar_passagens_fn or embed.embeddar_passagens
+        embeddings = calcular(todos_chunks)
 
     conexao = index.criar_indice(caminho_indice)
     index.reindexar(conexao, todos_chunks, embeddings=embeddings, nome_modelo=nome_modelo)
@@ -114,6 +203,11 @@ def formatar_relatorio(relatorio: dict) -> str:
         linhas.append("Removidos (fonte original não existe mais):")
         for caminho in relatorio["removidos"]:
             linhas.append(f"  - {caminho}")
+    if relatorio.get("preservados"):
+        linhas.append("")
+        linhas.append("Preservados (.md em docs-normalizado que não foram gerados pelo docserver):")
+        for caminho in relatorio["preservados"]:
+            linhas.append(f"  · {caminho}")
     return "\n".join(linhas)
 
 
@@ -133,12 +227,7 @@ def executar_busca(
 
 def formatar_resultados(resultados: list[dict]) -> str:
     if not resultados:
-        return (
-            "Nenhum trecho relevante encontrado. Tente reformular a consulta "
-            "(termo técnico exato ou pergunta em linguagem natural), restrinja a um "
-            "documento específico com o parâmetro documento, ou use listar_documentos "
-            "para ver o que existe."
-        )
+        return MENSAGEM_SEM_RESULTADOS
     blocos = []
     for i, r in enumerate(resultados, 1):
         blocos.append(f"[{i}] {r['caminho_origem']} › {r['secao']}\n{r['texto'][:300]}")
@@ -289,26 +378,100 @@ def _comando_serve(args: argparse.Namespace) -> None:
         transporte="http" if args.http else "stdio",
         host=args.host,
         porta=args.porta,
+        aquecer=not args.sem_aquecimento,
+    )
+
+
+def _ip_rede_local() -> str:
+    """IP desta máquina na rede local. O `connect` em UDP só escolhe a interface de
+    saída — nenhum pacote é enviado."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        try:
+            sock.connect(("10.255.255.255", 1))
+            return sock.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def _comando_server_mcp(args: argparse.Namespace) -> None:
+    from docserver.server import main as servir
+
+    if not INDICE_FIXO.exists():
+        print(
+            f"Índice não encontrado em {INDICE_FIXO}. Rode 'docserver ingest' na raiz do projeto primeiro.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    host = "0.0.0.0" if args.local else "127.0.0.1"
+    endereco = _ip_rede_local() if args.local else "127.0.0.1"
+    print(f"docserver: servidor MCP em http://{endereco}:{PORTA_SERVER_MCP}/mcp", file=sys.stderr)
+    if args.local:
+        print(
+            "docserver: aviso — sem autenticação; qualquer dispositivo da rede local tem acesso.",
+            file=sys.stderr,
+        )
+
+    servir(
+        docs_normalizado=DOCS_NORMALIZADO_FIXO,
+        indice=str(INDICE_FIXO),
+        transporte="http",
+        host=host,
+        porta=PORTA_SERVER_MCP,
+        aquecer=True,
     )
 
 
 def _comando_ingest(args: argparse.Namespace) -> None:
     docs_fonte = Path(args.docs_fonte)
     docs_normalizado = Path(args.docs_normalizado)
-    if args.limpar:
-        import shutil
+    try:
+        # valida antes do --limpar: com a fonte errada, nada pode ser apagado
+        validar_docs_fonte(docs_fonte)
+        if args.limpar:
+            limpar_saidas(docs_normalizado, args.indice)
 
-        shutil.rmtree(docs_normalizado, ignore_errors=True)
+        Path(args.indice).parent.mkdir(parents=True, exist_ok=True)
         docs_normalizado.mkdir(parents=True, exist_ok=True)
-        Path(args.indice).unlink(missing_ok=True)
 
+        relatorio = executar_ingestao(
+            docs_fonte,
+            docs_normalizado,
+            args.indice,
+            sem_embeddings=args.sem_embeddings,
+            forcar=args.forcar,
+        )
+    except ErroIngestao as erro:
+        print(f"Ingestão abortada: {erro}", file=sys.stderr)
+        sys.exit(1)
+    print(formatar_relatorio(relatorio))
+
+
+def _comando_watch(args: argparse.Namespace) -> None:
+    from docserver import watch
+
+    docs_fonte = Path(args.docs_fonte)
+    docs_normalizado = Path(args.docs_normalizado)
+    try:
+        validar_docs_fonte(docs_fonte)
+    except ErroIngestao as erro:
+        print(f"Ingestão abortada: {erro}", file=sys.stderr)
+        sys.exit(1)
     Path(args.indice).parent.mkdir(parents=True, exist_ok=True)
     docs_normalizado.mkdir(parents=True, exist_ok=True)
 
-    relatorio = executar_ingestao(
-        docs_fonte, docs_normalizado, args.indice, sem_embeddings=args.sem_embeddings
-    )
-    print(formatar_relatorio(relatorio))
+    try:
+        watch.observar(
+            docs_fonte,
+            docs_normalizado,
+            args.indice,
+            sem_embeddings=args.sem_embeddings,
+            espera=args.espera,
+        )
+    except KeyboardInterrupt:
+        print("docserver: watcher encerrado")
 
 
 def _comando_search(args: argparse.Namespace) -> None:
@@ -341,9 +504,30 @@ def construir_parser() -> argparse.ArgumentParser:
     subs = parser.add_subparsers(dest="comando", required=True)
 
     p_ingest = subs.add_parser("ingest", help="roda o pipeline completo de ingestão")
-    p_ingest.add_argument("--limpar", action="store_true")
+    p_ingest.add_argument(
+        "--limpar",
+        action="store_true",
+        help="remove os .md gerados pelo docserver e esvazia o índice antes de reingerir",
+    )
     p_ingest.add_argument("--sem-embeddings", action="store_true")
+    p_ingest.add_argument(
+        "--forcar",
+        action="store_true",
+        help="permite concluir mesmo sem arquivos suportados, esvaziando um índice com conteúdo",
+    )
     p_ingest.set_defaults(func=_comando_ingest)
+
+    p_watch = subs.add_parser(
+        "watch", help="observa docs-fonte e reingere automaticamente quando algum arquivo muda"
+    )
+    p_watch.add_argument(
+        "--espera",
+        type=float,
+        default=2.0,
+        help="segundos sem novas mudanças antes de reingerir (agrupa cópias e salvamentos em lote)",
+    )
+    p_watch.add_argument("--sem-embeddings", action="store_true")
+    p_watch.set_defaults(func=_comando_watch)
 
     p_search = subs.add_parser("search", help="busca pelo terminal")
     p_search.add_argument("consulta")
@@ -362,7 +546,23 @@ def construir_parser() -> argparse.ArgumentParser:
     )
     p_serve.add_argument("--host", default="127.0.0.1", help="apenas com --http")
     p_serve.add_argument("--porta", type=int, default=8765, help="apenas com --http")
+    p_serve.add_argument(
+        "--sem-aquecimento",
+        action="store_true",
+        help="não pré-carrega o modelo de embeddings no startup (a 1ª busca fica lenta)",
+    )
     p_serve.set_defaults(func=_comando_serve)
+
+    p_server_mcp = subs.add_parser(
+        "server-mcp",
+        help="sobe o servidor MCP via HTTP com o índice e os docs do projeto (use --local para a rede)",
+    )
+    p_server_mcp.add_argument(
+        "--local",
+        action="store_true",
+        help=f"expõe na rede local (0.0.0.0:{PORTA_SERVER_MCP}); sem a flag, só esta máquina acessa",
+    )
+    p_server_mcp.set_defaults(func=_comando_server_mcp)
 
     p_stats = subs.add_parser("stats", help="documentos, chunks, modelo, data da ingestão")
     p_stats.set_defaults(func=_comando_stats)

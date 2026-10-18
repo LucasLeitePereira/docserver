@@ -18,6 +18,11 @@ RUN if [ "$COM_EMBEDDINGS" = "true" ]; then \
         pip install --no-cache-dir .; \
     fi
 
+# Cache do Hugging Face fora do HOME: o download abaixo roda como root, mas o
+# servidor roda como `docserver` — com o cache padrão (~/.cache) ele não achava o
+# modelo e, offline, a busca caía para só léxica.
+ENV HF_HOME=/opt/huggingface
+
 # Baixa o modelo de embeddings durante o build, não no primeiro uso — importante
 # para o container não precisar de rede na primeira execução (ex.: demonstração).
 RUN if [ "$COM_EMBEDDINGS" = "true" ]; then \
@@ -27,8 +32,8 @@ RUN if [ "$COM_EMBEDDINGS" = "true" ]; then \
 ENV HF_HUB_OFFLINE=1
 
 RUN useradd --create-home --uid 1000 docserver \
-    && mkdir -p /app/docs-fonte /app/docs-normalizado /app/data \
-    && chown -R docserver:docserver /app
+    && mkdir -p /app/docs-fonte /app/docs-normalizado /app/data "$HF_HOME" \
+    && chown -R docserver:docserver /app "$HF_HOME"
 USER docserver
 
 VOLUME ["/app/docs-fonte", "/app/docs-normalizado", "/app/data"]

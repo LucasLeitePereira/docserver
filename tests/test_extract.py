@@ -174,3 +174,23 @@ def test_ler_front_matter_separa_metadados_do_corpo():
 
     assert meta["origem"] == "docs-fonte/guia.md"
     assert corpo == "# Guia\n\nTexto.\n"
+
+
+def test_extrair_pdf_desliga_o_ocr_do_pymupdf4llm(tmp_path, monkeypatch):
+    # com o OCR ligado, cada PDF dispara a procura do Tesseract no shell, que no
+    # Windows sem Tesseract imprime um UnicodeDecodeError por arquivo
+    import pymupdf4llm
+
+    chamadas = []
+
+    def _to_markdown(caminho, **kwargs):
+        chamadas.append(kwargs)
+        return "Texto suficiente para não cair no extrator alternativo. " * 5
+
+    monkeypatch.setattr(pymupdf4llm, "to_markdown", _to_markdown)
+    origem = tmp_path / "doc.pdf"
+    origem.write_bytes(b"%PDF-1.4")
+
+    extract.extrair_texto(origem)
+
+    assert chamadas == [{"use_ocr": False}]

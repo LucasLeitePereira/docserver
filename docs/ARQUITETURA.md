@@ -62,24 +62,27 @@ Com dois documentos de vocabulário parecido no mesmo índice (dois PDFs
 institucionais, por exemplo), isso mistura trechos de um documento na
 resposta sobre o outro, sem nenhum sinal de que algo deu errado. Por isso
 `buscar_hibrido` aplica um corte de relevância depois do RRF: um resultado só
-sobrevive se ele apareceu de fato na lista léxica bruta (BM25 já confirmou
-que pelo menos um termo relevante da consulta, sem stopwords, casa no
-chunk — critério suficiente, porque a raridade do termo já pondera o score),
-ou se a similaridade de cosseno (calculada a partir da distância L2 do índice
-vetorial, com os embeddings normalizados) passar de `SIMILARIDADE_MINIMA`
-(variável de ambiente, padrão 0.85). Sem esse corte, uma busca híbrida
+sobrevive se apareceu na lista léxica **e** cobre pelo menos
+`COBERTURA_LEXICA_MINIMA` (variável de ambiente, padrão 0.5) do peso IDF dos
+termos da consulta, ou se a similaridade de cosseno (calculada a partir da
+distância L2 do índice vetorial, com os embeddings normalizados) passar de
+`SIMILARIDADE_MINIMA` (variável de ambiente, padrão 0.85). O mesmo corte vale
+quando não há índice vetorial (fallback BM25). Sem ele, uma busca híbrida
 "bem-sucedida" e uma busca que só achou lixo são indistinguíveis do lado do
 agente.
 
-A primeira versão desse corte recalculava uma "cobertura léxica" própria
-(exigindo que pelo menos metade dos termos da consulta aparecesse no chunk),
-mas isso se mostrou mais rígido que o próprio BM25 que gerou a lista: uma
-consulta como "como funciona a paginação dos endpoints" acerta o chunk certo
-(seção "Paginação") mesmo esse chunk só contendo "paginação" e não
-"endpoints" literalmente — o BM25 já sabe que isso basta, mas a cobertura de
-50% descartava o acerto. Confiar na lista léxica bruta em vez de recalcular
-esse critério resolveu a regressão sem reabrir a porta para ruído puro (uma
-consulta como "receita de bolo" segue sem nenhum match léxico real).
+A cobertura é ponderada por IDF (a mesma fórmula do BM25, calculada no escopo
+da busca), e termos que não aparecem em nenhum chunk saem do denominador. As
+duas versões anteriores falhavam em sentidos opostos:
+
+- **Contar termos sem peso** (≥50% dos termos no chunk) descartava acertos
+  legítimos: "como funciona a paginação dos endpoints" acerta a seção
+  "Paginação", que não contém "endpoints". Com IDF, "endpoints" não existe no
+  corpus e não pesa; "paginação" sozinho cobre 100%.
+- **Aceitar qualquer item da lista léxica** deixava passar ruído, porque a
+  query FTS5 usa `OR`: "rate limit da API" trazia trechos do livro que só
+  mencionam "API". Com IDF, "API" (termo comum) vale uma fração pequena do
+  peso, e um chunk que só tem ele fica bem abaixo de 0.5.
 
 O padrão de 0.85 foi calibrado empiricamente contra o corpus real deste
 projeto (relatório de Niterói + calendário acadêmico + docs de exemplo): o
@@ -150,6 +153,20 @@ depender de uma API externa nem de GPU. Os embeddings são normalizados
 (`sim = 1 - distância²/2`), sem precisar de uma segunda consulta só para
 normalizar depois.
 
+O modelo é carregado **no startup do `docserver serve`**, numa thread em
+paralelo ao servidor (`server._aquecer`), e não na primeira busca: o import de
+torch + sentence-transformers + pesos leva de 70 a 120 s em CPU no Windows, e a
+primeira busca pagaria esse custo inteiro. O aquecimento não pode rodar *antes*
+de o servidor atender: o cliente MCP espera a resposta ao `initialize` por tempo
+limitado (30 s no Claude Code) e desistia da conexão. Uma busca que chegue
+durante o aquecimento espera o lock de `embed.obter_modelo` em vez de carregar
+uma segunda instância. Com o modelo em cache local, o carregamento não consulta
+o Hugging Face Hub. O servidor também mantém uma única conexão SQLite por
+processo (protegida por lock) em vez de abrir uma por tool call.
+`serve --sem-aquecimento` volta ao carregamento preguiçoso (só na primeira
+busca); uma falha no aquecimento só é registrada em stderr e o servidor segue no
+ar.
+
 ### Chunks limitados pelo tamanho real de tokens, não por uma estimativa de caracteres
 
 `multilingual-e5-small` trunca silenciosamente qualquer texto acima de 512
@@ -172,7 +189,12 @@ granularidade que a busca por seção depende.
 
 ### `listar_documentos` e `ler_documento` nunca servem o que não está no índice
 
-Ambos leem o índice (`indice.db`), não o disco, para decidir o que existe. Um
+Ambos leem o índice (`indice.db`), não o disco, para decidir o que existe.
+`ler_documento` resolve o caminho pedido (de origem ou normalizado, completo,
+parcial ou só o nome) contra o índice e só então lê
+`<--docs-normalizado>/<caminho_normalizado>` — o índice guarda esse caminho
+relativo e em formato POSIX justamente para funcionar com ingestão e servidor
+em diretórios diferentes. Um
 `.md` que sobrou em `docs-normalizado/` de uma ingestão anterior — porque o
 arquivo original em `docs-fonte/` foi apagado ou renomeado depois — não é
 mais gerado nem listado, mesmo que o arquivo continue fisicamente ali (a
@@ -183,6 +205,32 @@ ainda presente em `docs-normalizado/` de uma ingestão anterior — que causou
 uma busca sobre um documento devolver trechos de outro completamente
 diferente.
 
+### Watcher como processo separado, disparando a ingestão completa
+
+`docserver watch` (`src/docserver/watch.py`) observa `docs-fonte/` com o
+`watchdog`, agrupa os eventos por alguns segundos e chama o mesmo
+`executar_ingestao` do `docserver ingest`. Não existe caminho de indexação
+novo: todas as proteções e a remoção de órfãos valem igual, e a decisão de
+reindexação completa continua de pé.
+
+Ele roda num processo próprio, e não como thread do servidor MCP, por três
+motivos: no transporte stdio o stdout é o canal do protocolo e não pode receber
+relatórios; o cálculo de embeddings de uma ingestão não disputa CPU e GIL com as
+buscas; e uma falha no watcher não derruba o servidor. A consistência entre os
+dois processos vem do SQLite: a troca dos chunks é uma única transação.
+
+O índice usa `journal_mode=WAL` (`index.criar_indice`), com `timeout` de 30 s
+nas conexões. Com o journal padrão, a gravação final da reingestão bloqueava
+as leituras do servidor, e uma busca que esperasse mais de 5 s falhava com
+`database is locked`. Em WAL, a busca continua vendo o índice anterior até o
+commit, e a reingestão não espera as buscas em andamento. Enquanto há conexões
+abertas, o índice ganha dois arquivos ao lado, `indice.db-wal` e
+`indice.db-shm`; eles fazem parte do banco e não devem ser apagados com o
+servidor no ar. O custo é que o `-shm` exige memória compartilhada entre os
+processos: num bind mount do Docker Desktop, dois containers (ou host e
+container) não conseguem abrir o mesmo índice ao mesmo tempo (ver
+`docs/DEPLOY.md`).
+
 ## Fase futura
 
 Deliberadamente fora de escopo nesta versão (ver seção 12 do plano original):
@@ -192,7 +240,8 @@ Deliberadamente fora de escopo nesta versão (ver seção 12 do plano original):
 - **Transporte HTTP com OAuth** — para servir múltiplos usuários/serviços remotos.
 - **Permissão por documento** — hoje qualquer agente conectado vê toda a documentação.
 - **Interface web** — hoje a única forma de leitura humana é o Markdown normalizado em disco.
-- **Reindexação automática via CI ou watcher de arquivos** — hoje `docserver ingest` é manual.
+- **Reindexação automática via CI** — o watcher local (`docserver watch`) já existe; falta disparar a ingestão a partir de um pipeline.
+- **Watcher garantido em Linux** — modo polling para Docker/WSL2/rede e execução como serviço (ver `docs/INGESTAO.md`).
 - **OCR para PDF escaneado** — hoje esses arquivos só são marcados como "suspeitos" no relatório.
 - **Integração direta com Confluence, Google Drive, Notion** — hoje a entrada é sempre `docs-fonte/`.
 

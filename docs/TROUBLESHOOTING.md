@@ -28,9 +28,45 @@ pergunta, ou de um documento diferente do que se esperava:
    apagado da fonte mas ainda indexado — que originalmente causava esse tipo
    de mistura.
 3. Se mesmo assim um resultado claramente irrelevante aparecer, é o corte de
-   relevância (`SIMILARIDADE_MINIMA`, ver `docs/ARQUITETURA.md`) que precisa
-   de ajuste — aumente o valor via variável de ambiente se estiver frouxo
-   demais para o seu corpus.
+   relevância que precisa de ajuste (ver `docs/ARQUITETURA.md`) — aumente
+   `COBERTURA_LEXICA_MINIMA` se o ruído vem de termos comuns da consulta, ou
+   `SIMILARIDADE_MINIMA` se vem da via vetorial. Se, ao contrário, acertos
+   legítimos somem, reduza-os.
+
+## `docserver ingest` abortou ("Ingestão abortada: ...")
+
+A ingestão se recusa a apagar dados por engano e, nesses casos, não altera
+nem `docs-normalizado/` nem o índice (ver "Proteções contra perda de dados"
+em `docs/INGESTAO.md`):
+
+- **"pasta de documentos de origem não encontrada"** — confira o
+  `--docs-fonte` e o diretório de onde o comando foi executado.
+- **"nenhum arquivo em formato suportado"** ou **"não gerou nenhum chunk"** —
+  se a intenção é mesmo esvaziar o índice, repita com `--forcar`.
+
+## `docserver watch` não reagiu a uma mudança
+
+1. Confira se a mudança foi num arquivo que a ingestão leria: formatos não
+   suportados, arquivos ocultos (`.algo`), temporários do Office (`~$algo`) e
+   pastas vazias são ignorados de propósito.
+2. Espere o `--espera` (2 s por padrão) **sem novas mudanças**: enquanto um
+   editor ou uma cópia continuam gravando, a contagem recomeça.
+3. Se aparece `docserver: ingestão abortada: ...`, a mudança foi detectada, mas
+   a ingestão se recusou a rodar (ver a seção anterior). O watcher não aceita
+   `--forcar`; para esvaziar o índice de propósito, use `docserver ingest --forcar`.
+4. Em **Linux**, o watcher depende de `inotify`, que não recebe eventos em
+   volumes do Docker montados a partir de Windows/macOS, em `/mnt/c` do WSL2 e
+   em compartilhamentos NFS/SMB. Nesses ambientes, rode `docserver ingest`
+   manualmente (o modo polling é trabalho futuro, ver `docs/INGESTAO.md`). Em
+   árvores muito grandes, aumente `fs.inotify.max_user_watches`.
+
+## `ler_documento` responde "Documento não encontrado" para tudo
+
+Índices criados antes da versão que passou a gravar o caminho normalizado
+relativo (`api/contratos.md`) não são compatíveis: rode `docserver ingest` uma
+vez. Se a mensagem for "está no índice, mas o arquivo normalizado não foi
+encontrado", o `--docs-normalizado` passado ao `serve` não é a pasta usada na
+ingestão.
 
 ## PDF virou texto embaralhado
 
@@ -68,6 +104,15 @@ hoje: rode o PDF por uma ferramenta de OCR externa antes de colocá-lo em
 - Teste o comando exato da configuração a partir de outro diretório
   (ex.: `cd ~ && /caminho/.venv/bin/docserver --indice ... serve`). Ele deve
   ficar parado esperando entrada — se sair com erro, o cliente também falha.
+- Conexão recusada por timeout (no Claude Code, `connection timed out after
+  30000ms`): o servidor precisa responder ao `initialize` em poucos segundos.
+  Versões anteriores carregavam o modelo de embeddings (70 s ou mais) antes de
+  atender; a atual carrega em segundo plano. Se persistir, confira se o
+  comando não está esperando outra coisa (rede, permissão do antivírus) e
+  meça o tempo da primeira resposta.
+- Servidor em Docker via stdio: o container não pode ter TTY (`-T` no
+  `docker compose run`, sem `tty: true` no compose), senão as mensagens
+  JSON-RPC chegam corrompidas. Ver `docs/DEPLOY.md`.
 
 ## O agente ignora as ferramentas e responde de memória
 
@@ -92,6 +137,8 @@ hoje: rode o PDF por uma ferramenta de OCR externa antes de colocá-lo em
   imediatamente (bind mount), mas você ainda precisa rodar
   `docker compose run --rm docserver docserver ingest` para reindexar — o
   container não observa mudanças automaticamente (ver "Fase futura").
+  O `docserver-http` mantém o índice aberto: depois de reingerir, ele já
+  responde com o índice novo, sem reiniciar.
 - Se o container foi construído com `--build-arg COM_EMBEDDINGS=false`, o
   índice vetorial nunca é criado — isso é esperado, não um bug; a busca cai
   para BM25 puro e registra um aviso no log.

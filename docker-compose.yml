@@ -1,12 +1,30 @@
+x-docserver: &docserver
+  image: rag-local-docserver:latest
+  build:
+    context: .
+    args:
+      COM_EMBEDDINGS: "true"
+  volumes:
+    - ./docs-fonte:/app/docs-fonte
+    - ./docs-normalizado:/app/docs-normalizado
+    - ./data:/app/data
+
 services:
+  # Comandos avulsos e MCP via stdio: `docker compose run --rm -T docserver ...`.
+  # Sem `tty`: um TTY converte "\n" em "\r\n" e corrompe o JSON-RPC do stdio.
+  # O profile tira este serviço do `docker compose up`, que só sobe o HTTP.
   docserver:
-    build:
-      context: .
-      args:
-        COM_EMBEDDINGS: "true"
-    volumes:
-      - ./docs-fonte:/app/docs-fonte
-      - ./docs-normalizado:/app/docs-normalizado
-      - ./data:/app/data
+    <<: *docserver
+    profiles: ["cli"]
     stdin_open: true
-    tty: true
+
+  # MCP via HTTP: `docker compose up -d` → http://127.0.0.1:8765/mcp
+  # A porta é publicada só no loopback do host: o servidor não tem autenticação.
+  # Com ele no ar, reingira com `docker compose exec docserver-http docserver ingest`:
+  # o índice em WAL não pode ser aberto ao mesmo tempo por outro container.
+  docserver-http:
+    <<: *docserver
+    command: ["docserver", "serve", "--http", "--host", "0.0.0.0", "--porta", "8765"]
+    ports:
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped

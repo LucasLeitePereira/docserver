@@ -153,3 +153,34 @@ def test_resolver_origem_documento_inexistente_nao_encontra_nada(conn):
     index.indexar_chunks(conn, [_chunk(caminho_origem="docs-fonte/a.md")])
 
     assert index.resolver_origem(conn, "nao-existe.md") == []
+
+
+def test_indice_em_arquivo_usa_journal_wal(tmp_path):
+    conexao = index.criar_indice(str(tmp_path / "indice.db"))
+    try:
+        modo = conexao.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        conexao.close()
+
+    assert modo == "wal"
+
+
+def test_reingestao_grava_enquanto_uma_busca_le_o_indice_anterior(tmp_path):
+    # o watcher reingere com o servidor no ar: o leitor não pode travar o escritor,
+    # e enquanto lê continua vendo o índice anterior
+    caminho = str(tmp_path / "indice.db")
+    escritor = index.criar_indice(caminho)
+    index.indexar_chunks(escritor, [_chunk(texto="versão antiga do documento")])
+    leitor = index.criar_indice(caminho)
+    try:
+        leitor.execute("BEGIN")
+        assert len(index.buscar(leitor, "antiga")) == 1
+
+        index.reindexar(escritor, [_chunk(texto="versão nova do documento")])
+
+        assert len(index.buscar(leitor, "antiga")) == 1
+        leitor.execute("COMMIT")
+        assert len(index.buscar(leitor, "nova")) == 1
+    finally:
+        leitor.close()
+        escritor.close()
