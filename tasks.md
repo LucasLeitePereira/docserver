@@ -416,9 +416,9 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 |---|---|---|---|
 | — | C1–C6 do diagnóstico (caminhos no índice, chunk completo no MCP, corte léxico, proteções de ingestão, colisão de nomes, cold start) | 2026-09-14 | `6cdb0aa` |
 | — | Ingestão automática com `docserver watch` | 2026-09-14 | `88cffa4` |
-| — | Servidor responde ao `initialize` na hora: o aquecimento do modelo (70 s ou mais) roda numa thread, e o Claude Code desistia da conexão em 30 s | 2026-10-18 | pendente de commit |
-| TASK-002 | Fallback para busca léxica: `reindexar` sem embeddings descarta `chunks_vec`; `ImportError`, `OSError` e `ErroModeloDivergente` viram aviso no resultado | 2026-10-18 | pendente de commit |
-| TASK-003 | `journal_mode=WAL` e `timeout` de 30 s no índice. Limitação: dois containers não abrem o mesmo índice no bind mount do Docker Desktop (ver `DEPLOY.md`) | 2026-10-18 | pendente de commit |
-| TASK-004 | `embed.embeddar_passagens` em lote, **sem ganho medido**: em CPU (4 threads, chunks de ~330 tokens), 200 chunks levam 25 s com lote 1 e 30 s com lote 32. Padrão `batch_size=1`; o ganho de tempo fica com a TASK-005 | 2026-10-18 | pendente de commit |
-| TASK-011 | Compose sem TTY, com serviço `docserver-http` (porta só em loopback) e `docserver` no profile `cli`; `DEPLOY.md` corrigido. De quebra: `HF_HOME` no Dockerfile, que o usuário sem root não achava o modelo | 2026-10-18 | pendente de commit |
-| TASK-012 | `pymupdf4llm.to_markdown(..., use_ocr=False)`: some o `UnicodeDecodeError` da busca do Tesseract e os 8 warnings da suíte; texto extraído idêntico | 2026-10-18 | pendente de commit |
+| — | Servidor responde ao `initialize` na hora: o aquecimento do modelo (70 s ou mais) roda numa thread, e o Claude Code desistia da conexão em 30 s | 2026-10-18 | `a0ecf9e` |
+| TASK-002 | Fallback para busca léxica: `reindexar` sem embeddings descarta `chunks_vec`; `ImportError`, `OSError` e `ErroModeloDivergente` viram aviso no resultado | 2026-10-18 | `a0ecf9e` |
+| TASK-003 | `journal_mode=WAL` e `timeout` de 30 s no índice. Limitação: dois containers não abrem o mesmo índice no bind mount do Docker Desktop (ver `DEPLOY.md`) | 2026-10-18 | `a0ecf9e` |
+| TASK-004 | `embed.embeddar_passagens` em lote, **sem ganho medido**: em CPU (4 threads, chunks de ~330 tokens), 200 chunks levam 25 s com lote 1 e 30 s com lote 32. Padrão `batch_size=1`; o ganho de tempo fica com a TASK-005 | 2026-10-18 | `a0ecf9e` |
+| TASK-011 | Compose sem TTY, com serviço `docserver-http` (porta só em loopback) e `docserver` no profile `cli`; `DEPLOY.md` corrigido. De quebra: `HF_HOME` no Dockerfile, que o usuário sem root não achava o modelo | 2026-10-18 | `a0ecf9e` |
+| TASK-012 | `pymupdf4llm.to_markdown(..., use_ocr=False)`: some o `UnicodeDecodeError` da busca do Tesseract e os 8 warnings da suíte; texto extraído idêntico | 2026-10-18 | `a0ecf9e` |
