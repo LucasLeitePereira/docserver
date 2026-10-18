@@ -537,11 +537,18 @@ _VARIAVEIS_DE_REDE = (
     "DOCSERVER_PERMITIR_DOWNLOAD",
 )
 
+import os as _os
+
+_ENV_INICIAL = {nome: _os.environ.get(nome) for nome in _VARIAVEIS_DE_REDE}
+
 
 @pytest.fixture
 def ambiente_limpo(monkeypatch):
     for nome in _VARIAVEIS_DE_REDE:
-        monkeypatch.delenv(nome, raising=False)
+        # setenv + delenv faz o monkeypatch registrar o estado original, para
+        # desfazer o que o código sob teste definir com os.environ.setdefault
+        monkeypatch.setenv(nome, "x")
+        monkeypatch.delenv(nome)
     # o servidor de verdade nunca sobe nestes testes
     from docserver import server
 
@@ -581,3 +588,11 @@ def test_serve_com_permitir_download_nao_forca_o_modo_offline(ambiente_limpo, mo
 
     assert "HF_HUB_OFFLINE" not in os.environ
     assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
+
+
+def test_testes_do_serve_nao_vazam_variaveis_de_ambiente():
+    """Roda depois dos testes do serve: o ambiente deve voltar ao que era no import."""
+    import os
+
+    for nome in _VARIAVEIS_DE_REDE:
+        assert os.environ.get(nome) == _ENV_INICIAL[nome], nome
