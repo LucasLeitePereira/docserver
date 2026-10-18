@@ -946,7 +946,20 @@ def _comando_stats(args: argparse.Namespace) -> None:
     print(formatar_stats(executar_stats(args.indice)))
 
 
+def _preparar_ambiente_sem_rede() -> None:
+    """Evita chamadas de rede no startup do servidor (TASK-053): telemetria do Hugging
+    Face, checagem de atualização do FastMCP e consulta ao Hub com os modelos já em
+    cache. Precisa rodar antes de importar `docserver.server` (que importa o FastMCP) e o
+    `sentence_transformers`. Valores já definidos pelo usuário são respeitados;
+    `DOCSERVER_PERMITIR_DOWNLOAD=1` mantém o Hub acessível para baixar um modelo novo."""
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
+    if os.environ.get("DOCSERVER_PERMITIR_DOWNLOAD") != "1":
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+
 def _comando_serve(args: argparse.Namespace) -> None:
+    _preparar_ambiente_sem_rede()
     from docserver.server import main as servir
 
     servir(
@@ -973,6 +986,7 @@ def _ip_rede_local() -> str:
 
 
 def _comando_server_mcp(args: argparse.Namespace) -> None:
+    _preparar_ambiente_sem_rede()
     from docserver.server import main as servir
 
     if not INDICE_FIXO.exists():

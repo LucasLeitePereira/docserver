@@ -526,3 +526,58 @@ def test_formatar_tabela_avaliacao_mostra_colunas_por_modo():
     assert "12/20" in tabela  # linha geral
     assert "90%" in tabela and "50%" in tabela
     assert "geral" in tabela
+
+
+# --- ambiente do `serve` (TASK-053): sem chamadas de rede no startup ---
+
+_VARIAVEIS_DE_REDE = (
+    "HF_HUB_DISABLE_TELEMETRY",
+    "FASTMCP_CHECK_FOR_UPDATES",
+    "HF_HUB_OFFLINE",
+    "DOCSERVER_PERMITIR_DOWNLOAD",
+)
+
+
+@pytest.fixture
+def ambiente_limpo(monkeypatch):
+    for nome in _VARIAVEIS_DE_REDE:
+        monkeypatch.delenv(nome, raising=False)
+    # o servidor de verdade nunca sobe nestes testes
+    from docserver import server
+
+    monkeypatch.setattr(server, "main", lambda **kwargs: None)
+
+
+def test_serve_desliga_telemetria_checagem_de_update_e_rede_por_padrao(ambiente_limpo):
+    import os
+
+    cli.main(["serve"])
+
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
+    assert os.environ["FASTMCP_CHECK_FOR_UPDATES"] == "off"
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+def test_serve_respeita_valores_definidos_pelo_usuario(ambiente_limpo, monkeypatch):
+    import os
+
+    monkeypatch.setenv("HF_HUB_DISABLE_TELEMETRY", "0")
+    monkeypatch.setenv("FASTMCP_CHECK_FOR_UPDATES", "stable")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+
+    cli.main(["serve"])
+
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "0"
+    assert os.environ["FASTMCP_CHECK_FOR_UPDATES"] == "stable"
+    assert os.environ["HF_HUB_OFFLINE"] == "0"
+
+
+def test_serve_com_permitir_download_nao_forca_o_modo_offline(ambiente_limpo, monkeypatch):
+    import os
+
+    monkeypatch.setenv("DOCSERVER_PERMITIR_DOWNLOAD", "1")
+
+    cli.main(["serve"])
+
+    assert "HF_HUB_OFFLINE" not in os.environ
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
