@@ -4,9 +4,10 @@ Tarefas para implementar no futuro, no estilo de um board do Jira. A fonte
 principal é o `diagnostico.md` (IDs originais C/A/M/I entre parênteses),
 somada aos ajustes encontrados ao testar o `docserver watch`.
 
-> Última revisão: 2026-09-17 · Tarefas de prioridade alta 001–009 concluídas na branch
-> `feat/prioridade-alta`. TASK-052 a TASK-054 vieram da investigação do
-> `CONNECT_TIMEOUT` ao conectar no servidor MCP (2026-09-17).
+> Última revisão: 2026-10-18 · Tarefas de prioridade alta 001–009 concluídas na branch
+> `feat/prioridade-alta`, já integrada ao `master`. TASK-011 e TASK-053 implementadas
+> (`1d5fc31`–`8c7a473`), aguardando verificação em Docker e captura de tráfego.
+> TASK-052 a TASK-054 vieram da investigação do `CONNECT_TIMEOUT` ao conectar no servidor MCP (2026-09-17).
 > Os achados C1–C6 do diagnóstico já foram
 > resolvidos (commit `6cdb0aa`) e não aparecem aqui, exceto a parte pendente do C3.
 
@@ -43,7 +44,7 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 | TASK-008 | Pesos BM25 por coluna e caminhos `UNINDEXED` | Busca | 🔴 Alta | P | Concluída |
 | TASK-009 | Reranker cross-encoder sobre os candidatos fundidos | Busca | 🔴 Alta | G | Concluída |
 | TASK-010 | Autenticação por token no modo HTTP | Segurança | 🔴 Alta | M | Backlog |
-| TASK-011 | `docker-compose.yml` sem TTY e `DEPLOY.md` atualizado sobre HTTP | Infra | 🔴 Alta | P | Backlog |
+| TASK-011 | `docker-compose.yml` sem TTY e `DEPLOY.md` atualizado sobre HTTP | Infra | 🔴 Alta | P | Em andamento |
 | TASK-052 | Aquecer os modelos sem segurar o handshake MCP | Servidor MCP | 🔴 Alta | P | Concluída |
 | TASK-012 | Eliminar o `UnicodeDecodeError` da verificação do Tesseract | Extração | 🟡 Média | P | Concluída |
 | TASK-013 | Troca atômica do índice e de `docs-normalizado` | Ingestão | 🟡 Média | M | Concluída |
@@ -68,7 +69,7 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 | TASK-031 | Versão de Python de referência e CI no GitHub Actions | Infra | 🟡 Média | M | Backlog |
 | TASK-032 | Revisão fixa do modelo de embeddings | Infra | 🟡 Média | P | Backlog |
 | TASK-033 | Teste E2E do servidor com cliente MCP e cwds diferentes | Testes | 🟡 Média | M | Backlog |
-| TASK-053 | Eliminar as chamadas de rede no startup do servidor | Servidor MCP | 🟡 Média | P | Backlog |
+| TASK-053 | Eliminar as chamadas de rede no startup do servidor | Servidor MCP | 🟡 Média | P | Em andamento |
 | TASK-034 | Overlap de chunks por frase | Chunking | 🟢 Baixa | P | Backlog |
 | TASK-035 | Remover o custo quadrático da tokenização no chunking | Chunking | 🟢 Baixa | M | Backlog |
 | TASK-036 | Registrar qual contagem de tokens foi usada na ingestão | Chunking | 🟢 Baixa | P | Backlog |
@@ -395,12 +396,13 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **Resultado:** em stdio o `_aquecer()` passou a rodar numa thread daemon iniciada antes do `mcp.run()`; em HTTP continua síncrono, porque ali o link só é anunciado depois do `run` e quem conectar já encontra o modelo pronto. `embed.obter_modelo` e `rerank.obter_modelo` ganharam um lock com dupla checagem: antes o cache sozinho não bastava, já que aquecimento e busca agora correm em threads diferentes. Medido com o mesmo handshake real por stdio: **initialize em 7,9 s** (era 185,9 s e 259,3 s), e uma busca disparada durante o aquecimento devolveu resultado vetorial (similaridade 0,90), não o fallback léxico, com o modelo carregado uma única vez. O aquecimento e as barras de progresso do `sentence_transformers` saem todos no stderr, então o stdout do protocolo continua limpo. Falta só o teste E2E cronometrado de ponta a ponta, que fica com a TASK-033; a regressão está coberta por testes de unidade em `tests/test_server.py`.
 
 ### TASK-053 · Eliminar as chamadas de rede no startup do servidor
-- **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** melhoria · **Status:** Backlog
+- **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** melhoria · **Status:** Em andamento (`1d5fc31`, `48b2adc`, `851f736`)
 - **Origem:** investigação do `CONNECT_TIMEOUT` no Claude Code (2026-09-17)
 - **Contexto:** mesmo com os dois modelos já em cache local (470 MB cada, nada é baixado), o startup vai à rede. No stderr aparecem `GET https://huggingface.co/api/agent-harnesses` (telemetria do Hugging Face) e `GET https://pypi.org/pypi/fastmcp/json` (checagem de atualização do FastMCP). Comparando as medições, construir o modelo de embeddings levou **111,3 s** com `HF_HUB_OFFLINE=1` contra **163,7–248,6 s** com rede: a espera de rede responde por 50 a 135 s do startup. Sem rede, o `local_files_only=True` de `embed._carregar_modelo` já evita o Hub, mas o fallback do `except` e a telemetria passam por fora dele.
 - **O que fazer:** definir no próprio processo (antes de importar `sentence_transformers`) `HF_HUB_DISABLE_TELEMETRY=1` e `FASTMCP_CHECK_FOR_UPDATES=off`; avaliar `HF_HUB_OFFLINE=1` como padrão do `serve`, com uma env para reativar quando for preciso baixar um modelo novo. Documentar em `docs/DEPLOY.md` e registrar as envs no `docker-compose.yml`.
 - **Critérios de aceite:** nenhuma requisição HTTP durante `docserver serve` com os modelos em cache; o startup continua funcionando numa máquina sem rede; o tempo de aquecimento medido antes e depois fica registrado no PR.
 - **Relacionada:** TASK-032 (revisão fixa do modelo), TASK-052.
+- **Andamento (2026-10-18):** `serve` e `server-mcp` definem `HF_HUB_DISABLE_TELEMETRY=1`, `FASTMCP_CHECK_FOR_UPDATES=off` e `HF_HUB_OFFLINE=1` com `setdefault` antes de importar o servidor; `DOCSERVER_PERMITIR_DOWNLOAD=1` reativa o Hub. Envs no `docker-compose.yml` e em `docs/DEPLOY.md`. A medição ([`testes/2026-10-18-startup-sem-rede.md`](testes/2026-10-18-startup-sem-rede.md)) foi inconclusiva: com cache quente, 12,2 s com rede contra 14,9 s sem. Falta: capturar o tráfego do `serve` (zero requisições HTTP) e testar numa máquina sem rede.
 
 ---
 
@@ -414,10 +416,11 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **Critérios de aceite:** requisição sem token recebe 401; `docs/AGENTES.md` explica como configurar o token nos clientes.
 
 ### TASK-011 · `docker-compose.yml` sem TTY e `DEPLOY.md` atualizado sobre HTTP
-- **Prioridade:** 🔴 Alta · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
+- **Prioridade:** 🔴 Alta · **Esforço:** P · **Tipo:** bug · **Status:** Em andamento (`48b2adc`, `8c7a473`)
 - **Origem:** diagnóstico (I4)
 - **Contexto:** `tty: true` converte `\n` em `\r\n` e corrompe o JSON-RPC via stdio. `docs/DEPLOY.md` ainda diz que HTTP "está fora de escopo", mas o modo HTTP já existe.
 - **Critérios de aceite:** compose com `stdin_open: true` sem TTY (ou serviço HTTP com porta publicada); cliente MCP conecta ao container; `DEPLOY.md` corrigido.
+- **Andamento (2026-10-18):** compose sem `tty`, com serviço opcional `docserver-http` (profile `http`, `127.0.0.1:8765`); `DEPLOY.md` corrigido; o Dockerfile passou a baixar também o reranker padrão no build (a imagem roda com `HF_HUB_OFFLINE=1`). Falta: `docker compose build` do zero, `ingest`/`search` no container e handshake via `compose run --rm -T` sem `\r`. O build falhou com `No space left on device` e o daemon do Docker Desktop parou de responder.
 
 ### TASK-030 · Lockfile e limites superiores de versão nas dependências
 - **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** infra · **Status:** Backlog
