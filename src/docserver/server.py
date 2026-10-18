@@ -17,7 +17,17 @@ INDICE_PADRAO = "data/indice.db"
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("docserver")
+INSTRUCOES = (
+    "Este servidor guarda a documentação do projeto e o conhecimento revisado pela equipe: "
+    "decisões e o porquê delas, armadilhas, convenções e procedimentos de operação — o que "
+    "não dá para tirar lendo o código. Antes de investigar do zero por que algo é como é, "
+    "ou como operar uma parte do sistema, chame `buscar`. O código-fonte não está indexado: "
+    "para localizar arquivos e funções, use grep e glob. Se você aprender algo que custou "
+    "investigação e não está aqui, registre com a skill `documentar`; o documento passa por "
+    "revisão antes de entrar no índice."
+)
+
+mcp = FastMCP("docserver", instructions=INSTRUCOES)
 
 # Caminhos usados pelas tools. O cliente MCP pode subir o processo em qualquer
 # diretório (Claude Desktop, por exemplo, não usa a pasta do projeto), então
@@ -215,22 +225,14 @@ def listar_documentos() -> str:
 
 @mcp.tool()
 def buscar(consulta: str, limite: int = 5, documento: str | None = None) -> str:
-    """Busca na documentação técnica deste projeto e retorna os trechos mais relevantes,
-    cada um completo, com o arquivo de origem, a seção e a posição no documento. Use
-    SEMPRE antes de responder qualquer
-    pergunta sobre este projeto — arquitetura, endpoints, variáveis de ambiente, decisões
-    de projeto, processos internos — em vez de responder de memória. A busca é híbrida:
-    funciona tanto com termos técnicos exatos (nomes de função, tabela, variável) quanto
-    com perguntas em linguagem natural. Se a primeira busca não trouxer o que você
-    precisa, tente reformular com o outro estilo — uma pergunta natural se você buscou
-    por termo exato, ou o termo técnico provável se você buscou por descrição. Se você já
-    sabe (por `listar_documentos` ou por uma busca anterior) qual documento tem a resposta,
-    passe `documento` (caminho completo, parcial ou só o nome do arquivo) para restringir
-    a busca a ele — evita que trechos de outros documentos, ainda que pareçam relevantes
-    pela forma, se misturem na resposta. Um resultado vazio significa que nada no índice
-    passou no corte mínimo de relevância — não invente uma resposta nesse caso, avise que
-    a documentação não cobre o assunto. Se o trecho retornado não for suficiente, chame
-    `ler_documento` com o caminho indicado para ver o documento inteiro."""
+    """Busca na documentação do projeto — inclusive decisões, armadilhas e convenções
+    registradas — e devolve os trechos mais relevantes, cada um completo, com o arquivo de
+    origem e a seção. Use antes de responder sobre o projeto ou de investigar no código por
+    que algo é como é; para localizar código, use grep. Aceita termos técnicos exatos e
+    perguntas em linguagem natural; se a primeira busca falhar, reformule no outro estilo.
+    `documento` (caminho completo, parcial ou só o nome do arquivo) restringe a busca a um
+    documento. Resultado vazio significa que a documentação não cobre o assunto — não
+    invente; avise. Para o documento inteiro, use `ler_documento`."""
     return _buscar_texto(_config["indice"], consulta, limite, documento=documento)
 
 

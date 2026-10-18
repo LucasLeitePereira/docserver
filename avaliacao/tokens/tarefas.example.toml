@@ -1,0 +1,18 @@
+# Tarefas da medição de tokens. Copie para tarefas.toml e ajuste.
+#
+# O projeto piloto precisa ter .docserver.toml e conhecimento revisado em docs/conhecimento/.
+repositorio = "D:/projetos/piloto"   # caminho local ou URL git
+commit = "abc1234"                    # ponto de partida fixo: toda rodada começa igual
+
+[[tarefa]]
+id = "armadilha-wal"
+# Escolha tarefas cuja resposta depende de uma decisão ou armadilha registrada, não só do código.
+prompt = "Adicione um segundo processo de ingestão em paralelo sem corromper o índice."
+# Comando shell rodado na cópia depois do Claude; exit 0 = sucesso.
+verificacao = "python -m pytest -q tests/test_ingestao_paralela.py"
+timeout_s = 900   # opcional (padrão 900), vale para o Claude
+
+[[tarefa]]
+id = "convencao-nomes"
+prompt = "Crie o comando 'exportar' seguindo as convenções do projeto."
+verificacao = "python -m pytest -q tests/test_exportar.py"

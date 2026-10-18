@@ -1,5 +1,6 @@
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from watchdog.events import DirCreatedEvent, FileCreatedEvent, FileModifiedEvent, FileMovedEvent
@@ -59,7 +60,26 @@ def test_agrupador_rajada_de_eventos_vira_um_unico_disparo():
 )
 def test_manipulador_so_registra_arquivos_que_a_ingestao_leria(evento, relevante):
     agrupador = watch.Agrupador(espera=0)
-    watch._Manipulador(agrupador).dispatch(evento)
+    watch._Manipulador(agrupador, Path("docs-fonte")).dispatch(evento)
+    assert agrupador.pronto() is relevante
+
+
+@pytest.mark.parametrize(
+    "evento, relevante",
+    [
+        (FileModifiedEvent("docs-fonte/_pendentes/x.md"), False),
+        (FileCreatedEvent("docs-fonte/_pendentes/sub/y.md"), False),
+        (FileModifiedEvent("docs-fonte/_revisoes.jsonl"), False),
+        (FileMovedEvent("docs-fonte/_pendentes/x.md", "docs-fonte/conhecimento/x.md"), True),
+        (FileMovedEvent("docs-fonte/conhecimento/x.md", "docs-fonte/_rejeitados/x.md"), True),
+        (FileModifiedEvent("docs-fonte/conhecimento/x.md"), True),
+        (FileModifiedEvent("docs-fonte/api/.rascunho/x.md"), False),
+    ],
+)
+def test_manipulador_ignora_eventos_em_pastas_ignoradas(evento, relevante):
+    agrupador = watch.Agrupador(espera=0)
+    padroes = ("_pendentes", "_rejeitados", "_revisoes.jsonl")
+    watch._Manipulador(agrupador, Path("docs-fonte"), padroes).dispatch(evento)
     assert agrupador.pronto() is relevante
 
 
@@ -147,3 +167,175 @@ def test_comando_watch_com_fonte_inexistente_sai_com_erro(tmp_path, capsys):
         cli.main(["--docs-fonte", str(tmp_path / "nao-existe"), "--indice", str(tmp_path / "i.db"), "watch"])
     assert saida.value.code == 1
     assert "abortada" in capsys.readouterr().err.lower()
+
+
+# --- revisão de pendentes ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "evento, revisa, ingere",
+    [
+        (FileCreatedEvent("docs-fonte/_pendentes/x.md"), True, False),
+        (FileModifiedEvent("docs-fonte/_pendentes/y.MD"), True, False),
+        # o revisor só lê o primeiro nível de _pendentes: subpasta não dispara revisão
+        (FileModifiedEvent("docs-fonte/_pendentes/sub/y.md"), False, False),
+        (FileMovedEvent("docs-fonte/rascunho.tmp", "docs-fonte/_pendentes/x.md"), True, False),
+        (FileMovedEvent("docs-fonte/_pendentes/x.md", "docs-fonte/conhecimento/x.md"), False, True),
+        (FileModifiedEvent("docs-fonte/_pendentes/.oculto.md"), False, False),
+        (FileModifiedEvent("docs-fonte/_pendentes/nota.txt"), False, False),
+        (FileModifiedEvent("docs-fonte/conhecimento/x.md"), False, True),
+    ],
+)
+def test_manipulador_separa_eventos_de_revisao_e_ingestao(evento, revisa, ingere):
+    ingestao = watch.Agrupador(espera=0)
+    revisao = watch.Agrupador(espera=0)
+    manipulador = watch._Manipulador(
+        ingestao, Path("docs-fonte"), ("_pendentes",), revisao, Path("docs-fonte/_pendentes")
+    )
+    manipulador.dispatch(evento)
+    assert revisao.pronto() is revisa
+    assert ingestao.pronto() is ingere
+
+
+def _preparar_revisao(tmp_path):
+    docs_fonte = tmp_path / "docs-fonte"
+    pendentes = docs_fonte / "_pendentes"
+    pendentes.mkdir(parents=True)
+    return docs_fonte, pendentes
+
+
+def _iniciar_com_revisao(tmp_path, docs_fonte, pendentes, ingestoes, revisoes, revisar=None):
+    def registrar_revisao():
+        revisoes.append(1)
+
+    return _rodar_em_thread(
+        docs_fonte=docs_fonte,
+        docs_normalizado=tmp_path / "docs-normalizado",
+        indice=str(tmp_path / "indice.db"),
+        espera=0.1,
+        ingerir_fn=lambda: ingestoes.append(1),
+        ignorar=("_pendentes",),
+        revisar=revisar or registrar_revisao,
+        pasta_pendentes=pendentes,
+        espera_revisao=0.3,
+    )
+
+
+def test_observar_revisa_pendente_e_agrupa_edicoes_sem_ingerir(tmp_path):
+    docs_fonte, pendentes = _preparar_revisao(tmp_path)
+    ingestoes, revisoes = [], []
+    parar, thread = _iniciar_com_revisao(tmp_path, docs_fonte, pendentes, ingestoes, revisoes)
+    try:
+        assert _aguardar(lambda: len(ingestoes) == 1)
+        arquivo = pendentes / "nota.md"
+        arquivo.write_text("# v1\n", encoding="utf-8")
+        arquivo.write_text("# v2\n", encoding="utf-8")
+        arquivo.write_text("# v3\n", encoding="utf-8")
+        assert _aguardar(lambda: len(revisoes) >= 1)
+        time.sleep(1.5)
+        assert len(revisoes) == 1
+        assert len(ingestoes) == 1
+    finally:
+        parar.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_observar_evento_fora_de_pendentes_ingere_e_nao_revisa(tmp_path):
+    docs_fonte, pendentes = _preparar_revisao(tmp_path)
+    ingestoes, revisoes = [], []
+    parar, thread = _iniciar_com_revisao(tmp_path, docs_fonte, pendentes, ingestoes, revisoes)
+    try:
+        assert _aguardar(lambda: len(ingestoes) == 1)
+        (docs_fonte / "guia.md").write_text("# Guia\n", encoding="utf-8")
+        assert _aguardar(lambda: len(ingestoes) >= 2)
+        time.sleep(1.0)
+        assert revisoes == []
+    finally:
+        parar.set()
+        thread.join(timeout=5)
+
+
+def test_observar_ignora_oculto_e_nao_md_em_pendentes(tmp_path):
+    docs_fonte, pendentes = _preparar_revisao(tmp_path)
+    ingestoes, revisoes = [], []
+    parar, thread = _iniciar_com_revisao(tmp_path, docs_fonte, pendentes, ingestoes, revisoes)
+    try:
+        assert _aguardar(lambda: len(ingestoes) == 1)
+        (pendentes / ".oculto.md").write_text("x", encoding="utf-8")
+        (pendentes / "nota.txt").write_text("x", encoding="utf-8")
+        time.sleep(1.5)
+        assert revisoes == []
+        assert len(ingestoes) == 1
+    finally:
+        parar.set()
+        thread.join(timeout=5)
+
+
+def test_observar_pendentes_preexistentes_disparam_revisao_no_inicio(tmp_path):
+    docs_fonte, pendentes = _preparar_revisao(tmp_path)
+    (pendentes / "antigo.md").write_text("# antigo\n", encoding="utf-8")
+    ordem = []
+    parar, thread = _rodar_em_thread(
+        docs_fonte=docs_fonte,
+        docs_normalizado=tmp_path / "docs-normalizado",
+        indice=str(tmp_path / "indice.db"),
+        espera=0.1,
+        ingerir_fn=lambda: ordem.append("ingestao"),
+        ignorar=("_pendentes",),
+        revisar=lambda: ordem.append("revisao"),
+        pasta_pendentes=pendentes,
+        espera_revisao=60.0,
+    )
+    try:
+        assert _aguardar(lambda: len(ordem) >= 2)
+        assert ordem[:2] == ["ingestao", "revisao"]
+    finally:
+        parar.set()
+        thread.join(timeout=5)
+
+
+def test_observar_excecao_em_revisar_nao_derruba_o_watcher(tmp_path, capsys):
+    docs_fonte, pendentes = _preparar_revisao(tmp_path)
+    ingestoes, chamadas = [], []
+
+    def revisar_falhando():
+        chamadas.append(1)
+        raise RuntimeError("simulado")
+
+    parar, thread = _iniciar_com_revisao(
+        tmp_path, docs_fonte, pendentes, ingestoes, [], revisar=revisar_falhando
+    )
+    try:
+        assert _aguardar(lambda: len(ingestoes) == 1)
+        (pendentes / "a.md").write_text("# a\n", encoding="utf-8")
+        assert _aguardar(lambda: len(chamadas) >= 1)
+        assert thread.is_alive()
+        (docs_fonte / "guia.md").write_text("# Guia\n", encoding="utf-8")
+        assert _aguardar(lambda: len(ingestoes) >= 2)
+        assert thread.is_alive()
+    finally:
+        parar.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_observar_sem_revisar_ignora_pendentes_como_antes(tmp_path):
+    docs_fonte, pendentes = _preparar_revisao(tmp_path)
+    ingestoes = []
+    parar, thread = _rodar_em_thread(
+        docs_fonte=docs_fonte,
+        docs_normalizado=tmp_path / "docs-normalizado",
+        indice=str(tmp_path / "indice.db"),
+        espera=0.1,
+        ingerir_fn=lambda: ingestoes.append(1),
+        ignorar=("_pendentes",),
+    )
+    try:
+        assert _aguardar(lambda: len(ingestoes) == 1)
+        (pendentes / "a.md").write_text("# a\n", encoding="utf-8")
+        time.sleep(1.5)
+        assert len(ingestoes) == 1
+    finally:
+        parar.set()
+        thread.join(timeout=5)

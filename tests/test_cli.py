@@ -421,3 +421,241 @@ def test_formatar_tabela_avaliacao_mostra_colunas_por_modo():
     assert "lexico" in tabela
     assert "9/10" in tabela
     assert "3/10" in tabela
+
+
+def _projeto_com_config(tmp_path, monkeypatch, texto):
+    (tmp_path / ".docserver.toml").write_text(texto, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path.resolve()
+
+
+def _resolver(argv):
+    args = cli.construir_parser().parse_args(argv)
+    cli.resolver_configuracao(args, cli.config.carregar())
+    return args
+
+
+def test_precedencia_argumento_vence_arquivo_que_vence_padrao(tmp_path, monkeypatch):
+    raiz = _projeto_com_config(tmp_path, monkeypatch, '[docs]\nfonte = "docs"\nindice = "x/i.db"\n')
+
+    args = _resolver(["--docs-fonte", "explicito", "stats"])
+
+    assert args.docs_fonte == "explicito"  # argumento
+    assert args.indice == str(raiz / "x" / "i.db")  # arquivo
+    assert args.docs_normalizado == str(raiz / "docs-normalizado")  # padrão, a partir da raiz do arquivo
+
+
+def test_sem_arquivo_os_padroes_antigos_continuam(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    args = _resolver(["ingest"])
+
+    assert args.docs_fonte == "docs-fonte"
+    assert args.docs_normalizado == "docs-normalizado"
+    assert args.indice == cli.INDICE_PADRAO.replace("/", "\\") or args.indice == cli.INDICE_PADRAO
+    assert args.sem_embeddings is False
+    assert args.ignorar == ()
+
+
+def test_embeddings_false_no_arquivo_liga_sem_embeddings(tmp_path, monkeypatch):
+    _projeto_com_config(tmp_path, monkeypatch, "[docs]\nembeddings = false\n")
+
+    assert _resolver(["ingest"]).sem_embeddings is True
+    assert _resolver(["watch"]).sem_embeddings is True
+
+
+def test_serve_tambem_resolve_caminhos_do_arquivo(tmp_path, monkeypatch):
+    raiz = _projeto_com_config(tmp_path, monkeypatch, '[docs]\nnormalizado = "n"\nindice = "i.db"\n')
+
+    args = _resolver(["serve"])
+
+    assert args.docs_normalizado == str(raiz / "n")
+    assert args.indice == str(raiz / "i.db")
+
+
+@pytest.mark.parametrize(
+    "relativo, padroes, ignorado",
+    [
+        ("guia.md", (), False),
+        (".oculto.md", (), True),
+        ("api/.rascunho/x.md", (), True),
+        (".git/config.md", (), True),
+        ("api/~$relatorio.docx", (), True),
+        ("_pendentes/x.md", ("_pendentes",), True),
+        ("_pendentes/sub/y.md", ("_pendentes",), True),
+        ("_pendentes/x.md", ("_pendentes/*",), True),
+        ("_pendentes/x.md", (), False),
+        ("conhecimento/x.md", ("_pendentes", "_rejeitados"), False),
+        ("_revisoes.jsonl", ("_revisoes.jsonl",), True),
+        ("conhecimento/_revisoes.jsonl", ("_revisoes.jsonl",), False),
+    ],
+)
+def test_deve_ignorar_considera_o_caminho_relativo_a_docs_fonte(tmp_path, relativo, padroes, ignorado):
+    assert cli._deve_ignorar(tmp_path / relativo, tmp_path, padroes) is ignorado
+
+
+def test_deve_ignorar_fora_de_docs_fonte_olha_so_o_nome(tmp_path):
+    docs_fonte = tmp_path / "docs"
+    assert cli._deve_ignorar(tmp_path / ".oculta" / "x.md", docs_fonte) is False
+    assert cli._deve_ignorar(tmp_path / ".x.md", docs_fonte) is True
+
+
+def test_docs_fonte_em_pasta_oculta_nao_ignora_tudo_o_caminho_do_proprio_docs_fonte(tmp_path):
+    # um docs_fonte dentro de uma pasta oculta não pode ignorar tudo
+    docs_fonte = tmp_path / ".projeto" / "docs"
+    assert cli._deve_ignorar(docs_fonte / "guia.md", docs_fonte) is False
+
+
+def test_ingestao_ignora_pasta_pendentes(tmp_path):
+    docs_fonte = tmp_path / "docs"
+    (docs_fonte / "_pendentes").mkdir(parents=True)
+    (docs_fonte / "conhecimento").mkdir()
+    texto = "# Nota\n\n## Seção\n\nConteúdo suficiente para gerar um chunk indexável.\n"
+    (docs_fonte / "_pendentes" / "rascunho.md").write_text(texto, encoding="utf-8")
+    (docs_fonte / "conhecimento" / "ok.md").write_text(texto, encoding="utf-8")
+
+    relatorio = cli.executar_ingestao(
+        docs_fonte, tmp_path / "norm", str(tmp_path / "i.db"), sem_embeddings=True, ignorar=("_pendentes",)
+    )
+
+    assert relatorio["processados"] == 1
+    assert not (tmp_path / "norm" / "_pendentes").exists()
+
+
+def test_ingestao_com_lock_ocupado_aborta_sem_tocar_em_docs_normalizado(tmp_path):
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    from docserver import lock
+
+    docs_fonte = tmp_path / "docs-fonte"
+    docs_fonte.mkdir()
+    (docs_fonte / "guia.md").write_text("# Guia\n\nTexto suficiente para virar chunk.\n", encoding="utf-8")
+    docs_normalizado = tmp_path / "docs-normalizado"
+    caminho_indice = str(tmp_path / "indice.db")
+    sinal = tmp_path / "sinal"
+    script = (
+        "import sys, time\nfrom pathlib import Path\nfrom docserver import lock\n"
+        "with lock.travar(Path(sys.argv[1])):\n    Path(sys.argv[2]).write_text('x')\n    time.sleep(4)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, str(lock.caminho_lock(Path(caminho_indice))), str(sinal)]
+    )
+    try:
+        limite = time.monotonic() + 30
+        while not sinal.exists():
+            assert time.monotonic() < limite
+            time.sleep(0.05)
+        with pytest.raises(cli.ErroIngestao, match="outra ingestão"):
+            cli.executar_ingestao(
+                docs_fonte, docs_normalizado, caminho_indice, sem_embeddings=True, espera_lock_s=0.5
+            )
+        assert not docs_normalizado.exists()
+    finally:
+        proc.wait(timeout=30)
+
+
+def test_comando_init_cria_arquivos_e_e_idempotente(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init", "--raiz", str(tmp_path / "proj")])
+    assert (tmp_path / "proj" / ".docserver.toml").exists()
+    cli.main(["init", "--raiz", str(tmp_path / "proj")])
+
+
+def test_comando_init_funciona_com_toml_invalido(tmp_path):
+    (tmp_path / ".docserver.toml").write_text("isto não é toml [[[", encoding="utf-8")
+    cli.main(["init", "--raiz", str(tmp_path)])
+
+
+# --- `docserver revisar` e a revisão no watcher -------------------------------------------
+
+_REVISOR_FALSO = """
+import json, sys
+sys.stdin.read()
+resposta = {"decisao": "aprovar", "motivos": ["explica o porquê"]}
+print(json.dumps({"type": "result", "result": json.dumps(resposta), "total_cost_usd": 0.01}))
+"""
+
+
+def _projeto_com_pendente(tmp_path):
+    import json
+    import sys
+
+    from docserver import init
+
+    init.inicializar(tmp_path, modelo_revisor="modelo-revisor")
+    revisor = tmp_path / "revisor_falso.py"
+    revisor.write_text(_REVISOR_FALSO, encoding="utf-8")
+    toml = tmp_path / ".docserver.toml"
+    texto = toml.read_text(encoding="utf-8")
+    inicio = texto.index("comando = [")
+    fim = texto.index("]", inicio) + 1
+    # string JSON é string básica válida em TOML (escapa as barras dos caminhos do Windows)
+    comando = f"comando = [{json.dumps(sys.executable)}, {json.dumps(str(revisor))}]"
+    toml.write_text(texto[:inicio] + comando + texto[fim:], encoding="utf-8")
+    (tmp_path / "docs" / "_pendentes" / "wal.md").write_text(
+        "---\ntitulo: Por que WAL\ntipo: decisao\ngerado_por: modelo-autor\n---\n\n"
+        "# Por que WAL\n\nO watcher escreve enquanto o MCP lê; sem WAL o leitor trava.\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_revisar_sem_docserver_toml_sai_com_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as saida:
+        cli.main(["revisar"])
+
+    assert saida.value.code == 2
+    assert "docserver init" in capsys.readouterr().out
+
+
+def test_revisar_aprova_move_e_indexa(tmp_path, monkeypatch, capsys):
+    raiz = _projeto_com_pendente(tmp_path)
+    monkeypatch.chdir(raiz)
+
+    with pytest.raises(SystemExit) as saida:
+        cli.main(["revisar"])
+
+    assert saida.value.code == 0
+    aprovado = raiz / "docs" / "conhecimento" / "wal.md"
+    assert aprovado.exists()
+    assert not (raiz / "docs" / "_pendentes" / "wal.md").exists()
+    assert "revisado_por: modelo-revisor" in aprovado.read_text(encoding="utf-8")
+    resultados = cli.executar_busca(str(raiz / ".docserver" / "indice.db"), "watcher WAL", 5, modo="lexico")
+    assert any("conhecimento/wal.md" in r["caminho_origem"] for r in resultados)
+
+
+def test_revisar_com_outra_revisao_em_andamento_sai_com_1(tmp_path, monkeypatch, capsys):
+    from docserver import lock
+
+    raiz = _projeto_com_pendente(tmp_path)
+    monkeypatch.chdir(raiz)
+
+    with lock.travar(lock.caminho_lock(raiz / ".docserver" / "indice.db", "revisao")):
+        with pytest.raises(SystemExit) as saida:
+            cli.main(["revisar"])
+
+    assert saida.value.code == 1
+    assert (raiz / "docs" / "_pendentes" / "wal.md").exists()
+
+
+def test_watch_liga_a_revisao_so_com_docserver_toml(tmp_path, monkeypatch):
+    from docserver import watch
+
+    chamadas = []
+    monkeypatch.setattr(watch, "observar", lambda *a, **k: chamadas.append(k))
+
+    monkeypatch.chdir(_projeto_com_pendente(tmp_path / "com"))
+    cli.main(["watch"])
+    sem = tmp_path / "sem"
+    (sem / "docs-fonte").mkdir(parents=True)
+    monkeypatch.chdir(sem)
+    cli.main(["watch"])
+
+    assert chamadas[0]["revisar"] is not None
+    assert chamadas[0]["pasta_pendentes"].name == "_pendentes"
+    assert chamadas[1]["revisar"] is None

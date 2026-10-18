@@ -105,8 +105,10 @@ Como funciona:
   --sem-embeddings` para ingestões só léxicas.
 - **Convivência com o servidor.** Os embeddings são calculados antes de abrir o
   índice, e a troca dos chunks acontece numa única transação SQLite: o servidor
-  vê o índice antigo ou o novo, nunca um meio-termo. Não rode `docserver ingest`
-  manualmente enquanto o watcher estiver ativo.
+  vê o índice antigo ou o novo, nunca um meio-termo. Ingestões simultâneas (o
+  watcher, `docserver ingest`, `docserver revisar`) se serializam pelo lock de
+  ingestão (ver "Lock de ingestão"), então rodar `docserver ingest` à mão com o
+  watcher ativo espera a vez em vez de corromper algo.
 
 Os argumentos globais valem igual ao `ingest`:
 `docserver --docs-fonte outra/pasta --indice outro.db watch`.
@@ -150,6 +152,109 @@ Além disso, cada subpasta consome um *watch*, limitado por
 
 Enquanto isso não existir, nesses ambientes rode `docserver ingest`
 manualmente depois de mudar os documentos.
+
+## Configuração por projeto (`.docserver.toml`)
+
+Um projeto que usa o docserver leva um `.docserver.toml` na raiz, normalmente
+gerado por `docserver init` (ver `docs/AGENTES.md`). Sem o arquivo, nada muda:
+valem `docs-fonte/`, `docs-normalizado/` e `data/indice.db` relativos ao
+diretório atual, com embeddings ligados e nada extra ignorado.
+
+```toml
+[docs]
+fonte = "docs"                       # pasta de origem dos documentos
+normalizado = ".docserver/normalizado"
+indice = ".docserver/indice.db"
+embeddings = false                   # false equivale a --sem-embeddings
+ignorar = ["_pendentes", "_rejeitados", "_revisoes.jsonl"]   # relativos a `fonte`
+```
+
+| Chave | Padrão sem a chave | O que faz |
+|---|---|---|
+| `docs.fonte` | `docs-fonte` | Pasta de origem dos documentos (equivale a `--docs-fonte`). |
+| `docs.normalizado` | `docs-normalizado` | Onde ficam os `.md` normalizados (`--docs-normalizado`). |
+| `docs.indice` | `data/indice.db` | Arquivo do índice (`--indice`). |
+| `docs.embeddings` | `true` | `false` faz ingestão e watcher serem só léxicos, como `--sem-embeddings`. |
+| `docs.ignorar` | `[]` | Padrões que a ingestão e o watcher não leem (ver "Regras de ignorar"). |
+
+A tabela `[revisor]` (comando, modelo, pastas, tentativas) é interpretada pelo
+`docserver revisar`; está descrita em `docs/AGENTES.md`.
+
+- **Como é encontrado.** O docserver sobe a partir do diretório atual, pasta por
+  pasta até a raiz do disco, e usa o primeiro `.docserver.toml` que achar (como o
+  git faz com `.git`). Por isso os comandos funcionam de qualquer subpasta do
+  projeto.
+- **Caminhos relativos** do arquivo valem a partir da **pasta do
+  `.docserver.toml`**, nunca do diretório atual.
+- **Precedência:** argumento da linha de comando > arquivo > padrão. Um
+  `--docs-fonte` ou `--indice` explícito sempre vence o arquivo (e, sendo
+  relativo, vale a partir do diretório atual). Uma exceção de mão única:
+  `--sem-embeddings` só liga o modo léxico; com `embeddings = false` no arquivo
+  não há flag que o desligue.
+- **Chaves desconhecidas** são ignoradas. **Erro de configuração** (TOML
+  inválido ou tipo errado, como `embeddings = "nao"`) imprime
+  `docserver: configuração inválida: <arquivo>: ...` em stderr e sai com código
+  **2**, antes de executar o comando. Só o `docserver init` dispensa o arquivo.
+- As pastas `[revisor].pendentes` e `[revisor].rejeitados` e o `[revisor].registro`
+  entram em `ignorar` sempre que existe um `.docserver.toml`, mesmo que a lista não
+  as cite: a quarentena de `docs/AGENTES.md` não depende de configuração.
+
+### Regras de ignorar
+
+Valem para a ingestão e para o watcher, sempre sobre o caminho **relativo à pasta
+de origem**, em formato POSIX. Um arquivo é ignorado se:
+
+- qualquer parte do caminho começa com `.` (pasta ou arquivo oculto, em qualquer
+  nível: `.git/`, `.docserver/`, `a/.rascunho/b.md`);
+- o nome começa com `~$` (temporário do Office);
+- algum padrão de `ignorar` casa (`fnmatch`) com o caminho **ou com qualquer pasta
+  ancestral** dele. Assim `"_pendentes"` (ou `"_pendentes/*"`) ignora a pasta
+  inteira, e `"*.rascunho.md"` ignora esses arquivos em qualquer lugar.
+
+Ignorado pelas regras não aparece em "Ignorados (formato)" do relatório: é como
+se o arquivo não existisse.
+
+### Front matter da origem
+
+Um `.md` de origem que já traz front matter (os documentos escritos por agentes
+trazem `titulo`, `tipo`, `gerado_por`...) tem o bloco separado do corpo e
+**mesclado** ao do docserver, num bloco só; antes, o original virava texto
+indexado. O parser aceita BOM e fins de linha CRLF, e um bloco aberto e nunca
+fechado conta como texto comum. Quem vence em caso de conflito:
+
+- `origem`, `extrator` e `ingerido_em` são sempre os calculados pelo docserver
+  (um `origem:` copiado de outro lugar estaria errado);
+- as demais chaves (`titulo`, `tipo`, `gerado_por`, `commit`, `arquivos`,
+  `revisado_por`...) são preservadas como o autor as escreveu.
+
+### `origem` com o nome real da pasta
+
+O `origem:` do normalizado, e portanto o `caminho_origem` que `buscar` mostra e
+cita, usa o **nome real da pasta de origem**: com `fonte = "docs"`, um arquivo vira
+`docs/conhecimento/x.md`, e não mais o `docs-fonte/` fixo de antes. Com
+`--docs-fonte .`, usa o nome da pasta atual. Índices criados antes disso guardam
+o prefixo antigo: rode `docserver ingest` uma vez.
+
+### Lock de ingestão
+
+Watcher, `docserver ingest` e `docserver revisar` podem rodar ao mesmo tempo sobre
+o mesmo índice, e duas ingestões simultâneas se atropelariam (uma apagaria como
+órfão o que a outra acabou de escrever). Cada ingestão segura um lock exclusivo
+em `<indice>.ingestao.lock`, ao lado do índice (por exemplo
+`.docserver/indice.db.ingestao.lock`):
+
+- se já houver outra em andamento, espera a vez por **até 300 s**. O
+  `docserver ingest` avisa `aguardando outra ingestão terminar…` em stderr;
+- esgotado o tempo, aborta sem alterar nada (`Ingestão abortada: ...`, código 1;
+  no watcher, só registra e segue observando);
+- é um **lock do sistema operacional** (`msvcrt.locking` no Windows, `flock` no
+  POSIX), e não a existência do arquivo: se o processo morre, o SO solta o lock, e
+  um `.lock` largado por uma execução antiga não trava nada. Pode apagá-lo à
+  vontade;
+- o índice em memória (`:memory:`, usado em testes) não usa lock.
+
+O `docserver revisar` usa um segundo lock, `<indice>.revisao.lock`, para que o
+watcher e uma revisão manual não avaliem o mesmo pendente duas vezes.
 
 ## Formatos suportados
 

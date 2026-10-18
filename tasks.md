@@ -40,12 +40,10 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 | TASK-013 | Troca atômica do índice e de `docs-normalizado` | Ingestão | 🟡 Média | M | Backlog |
 | TASK-014 | Servidor abre o índice somente leitura e sem escrita em consultas | Servidor MCP | 🟡 Média | P | Backlog |
 | TASK-015 | Watcher garantido em Linux: modo polling e execução como serviço | Ingestão | 🟡 Média | M | Backlog |
-| TASK-016 | Impedir ingestões simultâneas (watcher + `ingest` manual) | Ingestão | 🟡 Média | P | Backlog |
 | TASK-051 | Progresso por arquivo e por etapa durante a ingestão | Ingestão | 🟡 Média | P | Backlog |
 | TASK-017 | OCR seletivo por página em PDFs escaneados | Extração | 🟡 Média | G | Backlog |
 | TASK-018 | Estrutura de cabeçalhos e artefatos de acentuação em PDFs | Extração | 🟡 Média | M | Backlog |
 | TASK-019 | Detectar a codificação de `.txt`, `.md` e `.csv` | Extração | 🟡 Média | P | Backlog |
-| TASK-020 | `origem` respeita o `--docs-fonte` informado | Extração | 🟡 Média | P | Backlog |
 | TASK-021 | Ignorar cabeçalhos dentro de blocos de código | Chunking | 🟡 Média | P | Backlog |
 | TASK-022 | Tabelas e blocos de código como unidades atômicas | Chunking | 🟡 Média | M | Backlog |
 | TASK-023 | Breadcrumb de seções (`H1 › H2 › H3`) | Chunking | 🟡 Média | M | Backlog |
@@ -64,9 +62,7 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 | TASK-036 | Registrar qual contagem de tokens foi usada na ingestão | Chunking | 🟢 Baixa | P | Backlog |
 | TASK-037 | Stopwords em inglês e stemming em português | Busca | 🟢 Baixa | M | Backlog |
 | TASK-038 | Partition key por documento no `vec0` | Busca | 🟢 Baixa | M | Backlog |
-| TASK-039 | Ignorar pastas ocultas em `docs-fonte` | Extração | 🟢 Baixa | P | Backlog |
 | TASK-040 | Extrator de PDF devolve `(texto, extrator)` sem estado global | Extração | 🟢 Baixa | P | Backlog |
-| TASK-041 | Front matter robusto (CRLF, bloco não fechado, front matter de origem) | Extração | 🟢 Baixa | P | Backlog |
 | TASK-042 | CSV com escape de `\|` e divisão de tabelas grandes | Extração | 🟢 Baixa | P | Backlog |
 | TASK-043 | Expor documentos como resources MCP | Servidor MCP | 🟢 Baixa | M | Backlog |
 | TASK-044 | Enxugar a docstring de `buscar` e usar `instructions` do servidor | Servidor MCP | 🟢 Baixa | P | Backlog |
@@ -76,12 +72,18 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 | TASK-048 | Reduzir o tempo da suíte de testes rápida | Testes | 🟢 Baixa | P | Backlog |
 | TASK-049 | Remover código morto em `formatar_tabela_avaliacao` | CLI | 🟢 Baixa | P | Backlog |
 | TASK-050 | `docserver stats` mostrar a data da ingestão | CLI | 🟢 Baixa | P | Backlog |
+| TASK-052 | Marcar documentos possivelmente desatualizados na `buscar` | Servidor MCP | 🟡 Média | M | Backlog |
+| TASK-053 | Avaliação compara a origem sem a pasta raiz | CLI | 🟡 Média | P | Backlog |
+| TASK-054 | Primeira medição de tokens com e sem MCP | Testes | 🟡 Média | M | Backlog |
+| TASK-055 | Mensagem de erro do watcher para falhas em `revisar` | Ingestão | 🟢 Baixa | P | Backlog |
+| TASK-056 | Testar o lock no POSIX e o build do claude-isolado | Infra | 🟡 Média | P | Backlog |
 
 ### Ordem sugerida
 
 1. **Uso por agentes:** TASK-001, TASK-006.
 2. **Base para mexer na busca:** TASK-007 (sem avaliação ampla, as mudanças de busca são às cegas), depois TASK-008 e TASK-009.
-3. **Operação com o watcher:** TASK-005 (é ela, não os embeddings em lote, que corta o tempo de reingestão — ver TASK-004 em Concluídas), TASK-013, TASK-016.
+3. **Operação com o watcher:** TASK-005 (é ela, não os embeddings em lote, que corta o tempo de reingestão — ver TASK-004 em Concluídas), TASK-013.
+4. **Novas:** TASK-054 primeiro (medição de tokens), depois TASK-052, TASK-053, TASK-055 e TASK-056.
 
 ---
 
@@ -109,19 +111,19 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **O que fazer:** validar em Linux nativo, Docker e WSL2; flag `docserver watch --polling` usando `watchdog.observers.polling.PollingObserver` (com intervalo configurável); unit systemd de exemplo e/ou serviço `watch` no `docker-compose.yml`.
 - **Critérios de aceite:** com `--polling`, o watcher detecta a criação de um arquivo num volume montado no Docker; documentação atualizada em `INGESTAO.md`, `DEPLOY.md` e `TROUBLESHOOTING.md`.
 
-### TASK-016 · Impedir ingestões simultâneas (watcher + `ingest` manual)
-- **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
-- **Origem:** implementação do `docserver watch`
-- **Contexto:** hoje só a documentação pede para não rodar `docserver ingest` com o watcher ativo. Duas ingestões simultâneas reescrevem `docs-normalizado/` e o índice ao mesmo tempo.
-- **O que fazer:** lock de arquivo ao lado do índice (ex.: `data/indice.db.lock`) adquirido por `executar_ingestao`; a segunda ingestão aborta com mensagem clara (ou espera, no caso do watcher).
-- **Critérios de aceite:** teste com duas ingestões concorrentes: uma conclui e a outra recebe `ErroIngestao` explicando o lock; lock órfão (processo morto) não bloqueia para sempre.
-
 ### TASK-051 · Progresso por arquivo e por etapa durante a ingestão
 - **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** melhoria · **Status:** Backlog
 - **Origem:** teste do `docserver watch` (2026-09-15)
 - **Contexto:** a ingestão só imprime o relatório no fim. Ao adicionar um PDF de 16 MB, a reingestão passou mais de 18 minutos sem nenhuma saída. Só dava para saber em que etapa ela estava olhando os horários dos `.md` em `docs-normalizado/` e o uso de CPU do processo.
 - **O que fazer:** em `cli.executar_ingestao`, emitir uma linha por arquivo (`[3/11] extraindo pt857tpcr-b022020.pdf (16 MB)… 412 chunks em 95.2s`), uma linha ao iniciar cada etapa (extração, embeddings, gravação do índice) e progresso periódico dos embeddings (`embeddings 400/1351`). A saída vai por um callback injetável (`progresso_fn`), para os testes não poluírem a saída e o watcher prefixar com `docserver:`. O tempo de cada etapa entra no relatório final, o que mostra se o gargalo é a extração ou os embeddings (útil para priorizar TASK-005). No modo stdio do servidor, nada disso pode ir para o stdout.
 - **Critérios de aceite:** `docserver ingest` e `docserver watch` mostram o arquivo em processamento e o avanço dos embeddings; o relatório final traz o tempo por etapa e o arquivo mais lento; teste verifica as chamadas do callback.
+
+### TASK-055 · Mensagem de erro do watcher para falhas em `revisar`
+- **Prioridade:** 🟢 Baixa · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
+- **Origem:** revisão de 2026-10-18
+- **Contexto:** `watch._rodar_com_seguranca` é compartilhada entre a ingestão e a revisão; uma exceção em `revisar` aparece como "erro inesperado na ingestão".
+- **O que fazer:** fazer a mensagem indicar a etapa que falhou.
+- **Critérios de aceite:** exceção em `revisar` aparece como erro da revisão; exceção na ingestão continua aparecendo como erro da ingestão; teste cobre os dois caminhos.
 
 ---
 
@@ -156,31 +158,11 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **O que fazer:** tentar UTF-8 e, se falhar, usar `charset-normalizer` (já dependência transitiva); registrar a codificação detectada no front matter.
 - **Critérios de aceite:** teste com `.txt` em cp1252 contendo acentos é extraído corretamente.
 
-### TASK-020 · `origem` respeita o `--docs-fonte` informado
-- **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
-- **Origem:** diagnóstico (M17)
-- **Contexto:** `extract.normalizar` sempre prefixa `docs-fonte/`, mesmo com `--docs-fonte outra/pasta`; o caminho citado ao agente fica errado.
-- **O que fazer:** usar o nome da pasta de origem real (ou caminho relativo a ela) e documentar a compatibilidade com índices existentes.
-- **Critérios de aceite:** ingestão com `--docs-fonte manuais` grava `origem: manuais/...`.
-
-### TASK-039 · Ignorar pastas ocultas em `docs-fonte`
-- **Prioridade:** 🟢 Baixa · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
-- **Origem:** diagnóstico (M16)
-- **Contexto:** `cli._deve_ignorar` olha só o nome do arquivo; `.git/` e `.obsidian/` dentro de `docs-fonte` são ingeridas. O filtro do watcher (`watch.arquivo_relevante`) herda o mesmo comportamento.
-- **O que fazer:** ignorar se qualquer parte do caminho relativo começar com `.`.
-- **Critérios de aceite:** teste com `docs-fonte/.obsidian/nota.md` não indexado e mudanças nela não disparam o watcher.
-
 ### TASK-040 · Extrator de PDF devolve `(texto, extrator)` sem estado global
 - **Prioridade:** 🟢 Baixa · **Esforço:** P · **Tipo:** débito técnico · **Status:** Backlog
 - **Origem:** diagnóstico (M18)
 - **O que fazer:** remover `_ultimo_extrator_pdf`; os extratores retornam o nome do extrator usado junto com o texto.
 - **Critérios de aceite:** front matter continua registrando `pymupdf4llm`/`markitdown` corretamente; testes atuais passam.
-
-### TASK-041 · Front matter robusto
-- **Prioridade:** 🟢 Baixa · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
-- **Origem:** diagnóstico (M15)
-- **Contexto:** `ler_front_matter` lança `ValueError` com bloco não fechado, não trata CRLF, e um `.md` de origem com front matter próprio fica com dois blocos.
-- **Critérios de aceite:** testes para CRLF, bloco não fechado e `.md` de origem com front matter (os metadados originais não viram texto indexado).
 
 ### TASK-042 · CSV com escape de `|` e divisão de tabelas grandes
 - **Prioridade:** 🟢 Baixa · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
@@ -333,6 +315,14 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **Origem:** diagnóstico (M23)
 - **Contexto:** a docstring tem ~200 palavras e é consumida em toda conversa.
 - **Critérios de aceite:** docstring curta; a orientação de fluxo fica em `FastMCP(instructions=...)`; `docs/AGENTES.md` atualizado.
+- **Nota:** as `instructions` do servidor já foram adicionadas em `src/docserver/server.py` (`INSTRUCOES`).
+
+### TASK-052 · Marcar documentos possivelmente desatualizados na `buscar`
+- **Prioridade:** 🟡 Média · **Esforço:** M · **Tipo:** melhoria · **Status:** Backlog
+- **Origem:** Fase 6 do plano (frescor do conhecimento), revisão de 2026-10-18
+- **Contexto:** o índice não indica quando um documento deixou de acompanhar o código que descreve.
+- **O que fazer:** na `buscar`, marcar como "possivelmente desatualizado" o documento cujos `arquivos` mudaram depois do `commit` registrado, usando `git log <commit>..HEAD -- <arquivos>`.
+- **Critérios de aceite:** documento com `arquivos` alterados após o `commit` registrado aparece marcado; documento sem alteração não aparece marcado; a busca não falha quando não há repositório git.
 
 ---
 
@@ -379,6 +369,14 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **Contexto:** `data/indice.db` e `docs-normalizado/` contêm o texto integral dos PDFs (inclusive um livro comercial), mesmo com os PDFs no `.gitignore`.
 - **Critérios de aceite:** nota no README e em `DEPLOY.md`; conferir que `data/` e `docs-normalizado/` não vão para a imagem Docker nem para o Git por padrão.
 
+### TASK-056 · Testar o lock no POSIX e o build do claude-isolado
+- **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** teste · **Status:** Backlog
+- **Origem:** revisão de 2026-10-18 (TASK-016 concluída)
+- **Contexto:** o lock de ingestão só foi exercitado no caminho Windows (`msvcrt`). O build do claude-isolado com `COM_DOCSERVER=true` instala o docserver com `pip install git+https://github.com/LucasLeitePereira/docserver.git`, então depende de o branch já estar na master.
+- **O que fazer:** testar o caminho `fcntl` do lock em Linux; depois do merge, rodar o build do claude-isolado com `COM_DOCSERVER=true`.
+- **Critérios de aceite:** teste de duas ingestões concorrentes passa em Linux; build do claude-isolado com `COM_DOCSERVER=true` conclui com o docserver instalado da master.
+- **Dependências:** merge do branch `feat/rag-retroalimentado` na `master`.
+
 ---
 
 ## Épico: Testes e CLI
@@ -408,6 +406,20 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **Contexto:** o help promete "data da ingestão", mas o comando não mostra.
 - **Critérios de aceite:** data da última ingestão gravada em `metadados_indice` e exibida em `stats`.
 
+### TASK-053 · Avaliação compara a origem sem a pasta raiz
+- **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** bug · **Status:** Backlog
+- **Origem:** revisão de 2026-10-18 (relacionada ao TASK-020, concluída)
+- **Contexto:** `avaliacao/perguntas.yaml` usa `esperado: docs-fonte/...`, e a função de avaliação em `cli.py` compara `caminho_origem == esperado` por igualdade exata. Com `[docs].fonte` diferente de `docs-fonte`, a avaliação erra tudo.
+- **O que fazer:** comparar sem a primeira pasta, como `index._sem_pasta_raiz`.
+- **Critérios de aceite:** com `[docs].fonte` diferente de `docs-fonte`, a avaliação acerta as mesmas perguntas que com `docs-fonte`; teste cobre o caso.
+
+### TASK-054 · Primeira medição de tokens com e sem MCP
+- **Prioridade:** 🟡 Média · **Esforço:** M · **Tipo:** teste · **Status:** Backlog
+- **Origem:** revisão de 2026-10-18
+- **Contexto:** `avaliacao/tokens/medir.py` existe, mas não há medição real. As flags do `claude -p` assumidas no script ainda não foram confirmadas.
+- **O que fazer:** confirmar as flags do `claude -p` em `medir.py`; montar `avaliacao/tokens/tarefas.toml` com 5 a 8 tarefas reais de um projeto piloto; rodar a linha de base com e sem MCP; registrar o resultado em `projeto/`; repetir após algumas semanas de uso.
+- **Critérios de aceite:** flags confirmadas antes da medição; `tarefas.toml` com 5 a 8 tarefas; resultado da linha de base (com e sem MCP) registrado em `projeto/`; nova medição registrada depois de algumas semanas.
+
 ---
 
 ## Concluídas
@@ -422,3 +434,7 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 | TASK-004 | `embed.embeddar_passagens` em lote, **sem ganho medido**: em CPU (4 threads, chunks de ~330 tokens), 200 chunks levam 25 s com lote 1 e 30 s com lote 32. Padrão `batch_size=1`; o ganho de tempo fica com a TASK-005 | 2026-10-18 | `a0ecf9e` |
 | TASK-011 | Compose sem TTY, com serviço `docserver-http` (porta só em loopback) e `docserver` no profile `cli`; `DEPLOY.md` corrigido. De quebra: `HF_HOME` no Dockerfile, que o usuário sem root não achava o modelo | 2026-10-18 | `a0ecf9e` |
 | TASK-012 | `pymupdf4llm.to_markdown(..., use_ocr=False)`: some o `UnicodeDecodeError` da busca do Tesseract e os 8 warnings da suíte; texto extraído idêntico | 2026-10-18 | `a0ecf9e` |
+| TASK-016 | Lock de ingestão: `msvcrt`/`fcntl` em `<indice>.ingestao.lock`, com espera de até 300 s; `executar_ingestao` roda dentro dele | 2026-10-18 | branch feat/rag-retroalimentado (commit pendente) |
+| TASK-020 | `origem` usa o nome real da pasta de origem mais o caminho relativo; `index.resolver_documento` aceita qualquer prefixo de pasta | 2026-10-18 | branch feat/rag-retroalimentado (commit pendente) |
+| TASK-039 | `cli._deve_ignorar` testa todas as partes do caminho relativo, mais os padrões `ignorar` do `.docserver.toml` | 2026-10-18 | branch feat/rag-retroalimentado (commit pendente) |
+| TASK-041 | `extract.normalizar` mescla o front matter da origem com o do docserver num único bloco; `ler_front_matter` aceita BOM, CRLF e bloco não fechado | 2026-10-18 | branch feat/rag-retroalimentado (commit pendente) |
