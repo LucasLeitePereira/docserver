@@ -18,10 +18,10 @@ RUN if [ "$COM_EMBEDDINGS" = "true" ]; then \
         pip install --no-cache-dir .; \
     fi
 
-# Baixa o modelo de embeddings durante o build, não no primeiro uso — importante
+# Baixa o modelo de embeddings e o reranker padrão durante o build, não no primeiro uso — importante
 # para o container não precisar de rede na primeira execução (ex.: demonstração).
 RUN if [ "$COM_EMBEDDINGS" = "true" ]; then \
-        python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-small')"; \
+        python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; from docserver.rerank import MODELOS_RERANKER, RERANKER_PADRAO; SentenceTransformer('intfloat/multilingual-e5-small'); CrossEncoder(MODELOS_RERANKER[RERANKER_PADRAO])"; \
     fi
 
 ENV HF_HUB_OFFLINE=1

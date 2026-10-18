@@ -24,6 +24,11 @@ O `docker-compose.yml` faz bind mount de `docs-fonte/`, `docs-normalizado/`
 e `data/` — edite os arquivos fonte do lado de fora do container
 normalmente, e rode `ingest` de novo dentro dele.
 
+O build também baixa o reranker padrão (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`)
+além do `multilingual-e5-small`, porque a imagem roda com `HF_HUB_OFFLINE=1` e sem
+ele a busca cairia no fallback sem reranking. A imagem cresce na ordem de algumas
+centenas de MB (estimativa, o tamanho não foi medido).
+
 Para uma imagem mais leve, sem a camada vetorial (só BM25):
 
 ```bash
