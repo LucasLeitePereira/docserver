@@ -30,14 +30,62 @@ Para uma imagem mais leve, sem a camada vetorial (só BM25):
 docker compose build --build-arg COM_EMBEDDINGS=false
 ```
 
-**Limitação conhecida:** o transporte MCP usado aqui é stdio, e stdio
-dentro de um container tem atrito em alguns clientes MCP (o cliente precisa
-saber rodar `docker compose run` como se fosse o comando do servidor, o que
-nem todo cliente suporta configurar facilmente). O transporte HTTP resolveria
-isso, mas está fora de escopo desta versão (ver `docs/ARQUITETURA.md`). Para
-uso com um cliente MCP local, a instalação direta (sem Docker) tende a ser
-mais simples; Docker é mais adequado para ingestão/validação em CI ou numa
-VM/Codespace compartilhada.
+### Servidor MCP no container
+
+O compose tem dois serviços sobre a mesma imagem:
+
+| Serviço | Para quê | Como subir |
+|---|---|---|
+| `docserver-http` | MCP via HTTP, sempre no ar | `docker compose up -d` |
+| `docserver` (profile `cli`) | comandos avulsos e MCP via stdio | `docker compose run --rm -T docserver ...` |
+
+**HTTP (recomendado com Docker).** `docker compose up -d` sobe só o
+`docserver-http`, em `http://127.0.0.1:8765/mcp`. O cliente MCP conecta pela
+URL, sem precisar saber rodar o container:
+
+```bash
+claude mcp add --transport http docserver http://127.0.0.1:8765/mcp
+```
+
+Com o `docserver-http` no ar, rode a ingestão **dentro dele**, não num
+container novo:
+
+```bash
+docker compose exec docserver-http docserver ingest
+```
+
+O índice usa o modo WAL do SQLite, cujo arquivo de memória compartilhada
+(`indice.db-shm`) não é compartilhado entre containers num bind mount do
+Docker Desktop: um `docker compose run` com o servidor HTTP aberto falha com
+`unable to open database file`. Pelo mesmo motivo, não abra o mesmo `data/`
+ao mesmo tempo pelo host (venv) e por um container. O `docker compose run`
+continua valendo quando o `docserver-http` está parado.
+
+A porta é publicada só no loopback do host (`127.0.0.1:8765`), porque o
+servidor não tem autenticação. Para expor na rede, troque o mapeamento em
+`ports` sabendo que qualquer um na rede passa a ler toda a documentação. Não
+use junto com `docserver server-mcp` no host: os dois disputam a porta 8765.
+O modelo de embeddings é carregado em segundo plano na subida; as buscas que
+chegarem antes disso esperam o carregamento.
+
+**stdio.** O cliente MCP roda o container como se fosse o comando do servidor:
+
+```json
+{
+  "mcpServers": {
+    "docserver": {
+      "command": "docker",
+      "args": ["compose", "-f", "/caminho/absoluto/docker-compose.yml",
+               "run", "--rm", "-T", "docserver", "docserver", "serve"]
+    }
+  }
+}
+```
+
+O `-T` e a ausência de `tty` no compose são obrigatórios: um pseudo-TTY
+converte `\n` em `\r\n` e corrompe as mensagens JSON-RPC. Cada conexão sobe um
+container novo e paga o carregamento do modelo, então o HTTP costuma ser
+melhor; o stdio serve para clientes que só aceitam comando.
 
 ## Codespaces / VM
 

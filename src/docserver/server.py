@@ -135,8 +135,12 @@ def _buscar_texto(caminho_indice: str, consulta: str, limite: int = 5, documento
                 opcoes = "\n".join(f"- {c}" for c in candidatos)
                 return f"Caminho ambíguo, mais de um documento corresponde a '{documento}':\n{opcoes}"
             origem = candidatos[0]
-        resultados = index.buscar_hibrido(conexao, consulta, limite=limite, origem=origem)
-    return _formatar_resultados_mcp(resultados)
+        avisos: list[str] = []
+        resultados = index.buscar_hibrido(conexao, consulta, limite=limite, origem=origem, avisos=avisos)
+    texto = _formatar_resultados_mcp(resultados)
+    if avisos:
+        texto = "\n".join(f"Aviso: {aviso}" for aviso in avisos) + "\n\n" + texto
+    return texto
 
 
 def _dentro_de(caminho: Path, base: Path) -> bool:
@@ -180,14 +184,14 @@ def _ler_documento_texto(caminho: str, docs_normalizado: Path, caminho_indice: s
 
 
 def _aquecer(caminho_indice: str) -> None:
-    """Carrega o modelo de embeddings antes de aceitar requisições. Carregá-lo na
-    primeira busca (import de torch + pesos) levava mais de 120 s e segurava as
-    chamadas seguintes na fila. Sem índice vetorial não há o que aquecer; qualquer
-    falha aqui só é registrada — o servidor sobe mesmo assim."""
+    """Carrega o modelo de embeddings sem esperar a primeira busca, que de outro modo
+    pagaria o import de torch + pesos (mais de 70 s). Roda numa thread em paralelo ao
+    servidor (ver `main`). Sem índice vetorial não há o que aquecer; qualquer falha
+    aqui só é registrada — o servidor segue no ar."""
     if _indice_ausente(caminho_indice):
         return
     with _conexao(caminho_indice) as conexao:
-        tem_vetores = index._tabela_vetorial_existe(conexao)
+        tem_vetores = index._tem_vetores(conexao)
     if not tem_vetores:
         return
 
@@ -252,7 +256,13 @@ def main(
     _persistente["ativa"] = True
     try:
         if aquecer:
-            _aquecer(_config["indice"])
+            # Em paralelo, não antes de `mcp.run`: o cliente MCP espera a resposta ao
+            # `initialize` por tempo limitado (30 s no Claude Code), e carregar o modelo
+            # leva mais que isso. Uma busca que chegue antes do fim espera o lock de
+            # `embed.obter_modelo` em vez de carregar outra instância.
+            threading.Thread(
+                target=_aquecer, args=(_config["indice"],), name="docserver-aquecimento", daemon=True
+            ).start()
         if transporte == "stdio":
             # stdio não aceita host/porta: o cliente sobe o processo diretamente e fala
             # pelos streams padrão, sem rede — por isso nunca há um link para esse modo.

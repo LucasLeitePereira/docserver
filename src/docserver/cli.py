@@ -89,7 +89,7 @@ def executar_ingestao(
     docs_normalizado: Path,
     caminho_indice: str,
     sem_embeddings: bool = False,
-    embeddar_passagem_fn=None,
+    embeddar_passagens_fn=None,
     nome_modelo: str | None = None,
     forcar: bool = False,
 ) -> dict:
@@ -165,8 +165,8 @@ def executar_ingestao(
 
     embeddings = None
     if not sem_embeddings and todos_chunks:
-        calcular = embeddar_passagem_fn or embed.embeddar_passagem
-        embeddings = [calcular(c) for c in todos_chunks]
+        calcular = embeddar_passagens_fn or embed.embeddar_passagens
+        embeddings = calcular(todos_chunks)
 
     conexao = index.criar_indice(caminho_indice)
     index.reindexar(conexao, todos_chunks, embeddings=embeddings, nome_modelo=nome_modelo)

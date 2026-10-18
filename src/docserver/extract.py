@@ -76,7 +76,11 @@ def _extrair_pdf(caminho: Path) -> str:
     try:
         import pymupdf4llm
 
-        texto = _limpar_markdown_pdf(pymupdf4llm.to_markdown(str(caminho)))
+        # use_ocr=False: com o OCR ligado (padrão), cada PDF procura o Tesseract via
+        # `tesseract --list-langs`/`where tesseract` e, no Windows sem Tesseract, a
+        # resposta do shell em cp850 lida como UTF-8 imprime um UnicodeDecodeError por
+        # PDF. O docserver não faz OCR; o texto extraído é o mesmo.
+        texto = _limpar_markdown_pdf(pymupdf4llm.to_markdown(str(caminho), use_ocr=False))
     except Exception:
         texto = ""
 

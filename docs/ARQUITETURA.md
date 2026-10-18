@@ -153,15 +153,19 @@ depender de uma API externa nem de GPU. Os embeddings são normalizados
 (`sim = 1 - distância²/2`), sem precisar de uma segunda consulta só para
 normalizar depois.
 
-O modelo é carregado **no startup do `docserver serve`**, antes de aceitar
-requisições (`server._aquecer`), e não na primeira busca: o import de torch +
-pesos levava mais de 120 s e segurava na fila as chamadas que chegassem nesse
-meio-tempo — o cliente MCP chegava a desistir da primeira busca. Com o modelo
-em cache local, o carregamento não consulta o Hugging Face Hub. O servidor
-também mantém uma única conexão SQLite por processo (protegida por lock) em vez
-de abrir uma por tool call. `serve --sem-aquecimento` volta ao carregamento
-preguiçoso (startup rápido, primeira busca lenta); uma falha no aquecimento só
-é registrada em stderr e o servidor sobe mesmo assim.
+O modelo é carregado **no startup do `docserver serve`**, numa thread em
+paralelo ao servidor (`server._aquecer`), e não na primeira busca: o import de
+torch + sentence-transformers + pesos leva de 70 a 120 s em CPU no Windows, e a
+primeira busca pagaria esse custo inteiro. O aquecimento não pode rodar *antes*
+de o servidor atender: o cliente MCP espera a resposta ao `initialize` por tempo
+limitado (30 s no Claude Code) e desistia da conexão. Uma busca que chegue
+durante o aquecimento espera o lock de `embed.obter_modelo` em vez de carregar
+uma segunda instância. Com o modelo em cache local, o carregamento não consulta
+o Hugging Face Hub. O servidor também mantém uma única conexão SQLite por
+processo (protegida por lock) em vez de abrir uma por tool call.
+`serve --sem-aquecimento` volta ao carregamento preguiçoso (só na primeira
+busca); uma falha no aquecimento só é registrada em stderr e o servidor segue no
+ar.
 
 ### Chunks limitados pelo tamanho real de tokens, não por uma estimativa de caracteres
 
@@ -214,6 +218,18 @@ motivos: no transporte stdio o stdout é o canal do protocolo e não pode recebe
 relatórios; o cálculo de embeddings de uma ingestão não disputa CPU e GIL com as
 buscas; e uma falha no watcher não derruba o servidor. A consistência entre os
 dois processos vem do SQLite: a troca dos chunks é uma única transação.
+
+O índice usa `journal_mode=WAL` (`index.criar_indice`), com `timeout` de 30 s
+nas conexões. Com o journal padrão, a gravação final da reingestão bloqueava
+as leituras do servidor, e uma busca que esperasse mais de 5 s falhava com
+`database is locked`. Em WAL, a busca continua vendo o índice anterior até o
+commit, e a reingestão não espera as buscas em andamento. Enquanto há conexões
+abertas, o índice ganha dois arquivos ao lado, `indice.db-wal` e
+`indice.db-shm`; eles fazem parte do banco e não devem ser apagados com o
+servidor no ar. O custo é que o `-shm` exige memória compartilhada entre os
+processos: num bind mount do Docker Desktop, dois containers (ou host e
+container) não conseguem abrir o mesmo índice ao mesmo tempo (ver
+`docs/DEPLOY.md`).
 
 ## Fase futura
 

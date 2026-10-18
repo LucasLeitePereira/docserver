@@ -135,6 +135,10 @@ def _embeddar_falso(chunk):
     return [float(len(texto) % 7), float(len(texto) % 5), float(len(texto) % 3)]
 
 
+def _embeddar_lote_falso(chunks):
+    return [_embeddar_falso(c) for c in chunks]
+
+
 def _embeddar_consulta_falso(consulta):
     return [float(len(consulta) % 7), float(len(consulta) % 5), float(len(consulta) % 3)]
 
@@ -257,7 +261,7 @@ def test_ingestao_com_embeddings_grava_modelo_no_indice(tmp_path):
         docs_fonte,
         docs_normalizado,
         caminho_indice,
-        embeddar_passagem_fn=_embeddar_falso,
+        embeddar_passagens_fn=_embeddar_lote_falso,
         nome_modelo="fake",
     )
 
@@ -296,7 +300,7 @@ def test_busca_com_modo_lexico_nao_usa_vetorial(tmp_path):
         docs_fonte,
         docs_normalizado,
         caminho_indice,
-        embeddar_passagem_fn=_embeddar_falso,
+        embeddar_passagens_fn=_embeddar_lote_falso,
         nome_modelo="fake",
     )
 
@@ -319,7 +323,7 @@ def test_avaliar_roda_nos_tres_modos_quando_indice_vetorial_existe(tmp_path):
         docs_fonte,
         docs_normalizado,
         caminho_indice,
-        embeddar_passagem_fn=_embeddar_falso,
+        embeddar_passagens_fn=_embeddar_lote_falso,
         nome_modelo="fake",
     )
 

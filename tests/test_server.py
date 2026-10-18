@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -381,14 +382,29 @@ def test_buscar_devolve_o_chunk_inteiro_com_metadados(tmp_path):
     assert "posição 0 no documento" in texto
 
 
-def test_main_aquece_o_modelo_antes_de_aceitar_requisicoes(monkeypatch):
+def test_main_aquece_o_modelo_sem_atrasar_o_inicio_do_servidor(monkeypatch):
+    # o aquecimento demora mais que o timeout de conexão do cliente MCP: o servidor
+    # precisa estar atendendo enquanto o modelo ainda carrega
+    aquecimento_iniciado = threading.Event()
+    liberar_aquecimento = threading.Event()
     eventos = []
-    monkeypatch.setattr(server, "_aquecer", lambda caminho_indice: eventos.append("aquecer"))
-    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: eventos.append("run"))
+
+    def _aquecer_lento(caminho_indice):
+        aquecimento_iniciado.set()
+        liberar_aquecimento.wait(timeout=5)
+        eventos.append("aquecer")
+
+    def _servir(**kwargs):
+        assert aquecimento_iniciado.wait(timeout=5)
+        eventos.append("run")
+        liberar_aquecimento.set()
+
+    monkeypatch.setattr(server, "_aquecer", _aquecer_lento)
+    monkeypatch.setattr(server.mcp, "run", _servir)
 
     server.main()
 
-    assert eventos == ["aquecer", "run"]
+    assert eventos[0] == "run"
 
 
 def test_main_sem_aquecimento_nao_carrega_modelo(monkeypatch):
@@ -478,3 +494,19 @@ def test_configurar_resolve_caminhos_relativos_para_absolutos(tmp_path, monkeypa
 
     assert server._config["docs_normalizado"] == (tmp_path / "docs-normalizado").resolve()
     assert Path(server._config["indice"]) == (tmp_path / "data" / "indice.db").resolve()
+
+
+def test_buscar_repassa_ao_agente_o_aviso_de_busca_so_lexica(tmp_path, monkeypatch):
+    caminho_indice = _indice_vetorial(tmp_path)
+
+    def _sem_extra(consulta):
+        raise ImportError("No module named 'sentence_transformers'")
+
+    monkeypatch.setattr(embed, "embeddar_consulta", _sem_extra)
+    monkeypatch.setattr(embed, "NOME_MODELO", "fake")
+    monkeypatch.setattr(embed, "DIMENSAO", 3)
+
+    texto = server._buscar_texto(caminho_indice, "texto qualquer")
+
+    assert texto.startswith("Aviso: busca vetorial indisponível")
+    assert "docs-fonte/a.md" in texto

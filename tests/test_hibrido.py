@@ -286,3 +286,64 @@ def test_modelo_divergente_gera_erro_explicito_na_abertura_do_indice():
         assert False, "deveria ter levantado ErroModeloDivergente"
     except index.ErroModeloDivergente:
         pass
+
+
+def test_reingestao_sem_embeddings_sobre_indice_vetorial_volta_a_ser_so_lexica():
+    conexao = conn()
+    chunks = [_chunk(texto="O prazo de entrega padrão é de 30 dias úteis.")]
+    index.indexar_chunks(conexao, chunks, embeddings=[[1.0, 0.0, 0.0]], nome_modelo="fake")
+
+    index.reindexar(conexao, chunks)
+
+    def _nao_deve_embeddar(consulta):
+        raise AssertionError("não há vetores: o modelo não deve ser chamado")
+
+    resultados = index.buscar_hibrido(conexao, "entrega", embeddar_consulta_fn=_nao_deve_embeddar)
+    assert [r["ordem"] for r in resultados] == [0]
+    assert not index._tabela_vetorial_existe(conexao)
+
+
+def test_tabela_vetorial_vazia_nao_conta_como_indice_vetorial():
+    conexao = conn()
+    index.indexar_chunks(conexao, [_chunk()], embeddings=[[1.0, 0.0, 0.0]], nome_modelo="fake")
+    conexao.execute("DELETE FROM chunks_vec")
+
+    assert index._tabela_vetorial_existe(conexao)
+    assert not index._tem_vetores(conexao)
+
+
+def test_busca_hibrida_cai_para_lexica_com_aviso_se_o_modelo_nao_carrega():
+    conexao = conn()
+    chunks = [_chunk(texto="O prazo de entrega padrão é de 30 dias úteis.")]
+    index.indexar_chunks(conexao, chunks, embeddings=[[1.0, 0.0, 0.0]], nome_modelo="fake")
+
+    def _sem_extra(consulta):
+        raise ImportError("No module named 'sentence_transformers'")
+
+    avisos = []
+    resultados = index.buscar_hibrido(
+        conexao, "entrega", embeddar_consulta_fn=_sem_extra, nome_modelo="fake", dimensao=3, avisos=avisos
+    )
+
+    assert [r["ordem"] for r in resultados] == [0]
+    assert len(avisos) == 1
+    assert "sentence_transformers" in avisos[0]
+
+
+def test_busca_hibrida_cai_para_lexica_com_aviso_se_o_modelo_diverge():
+    conexao = conn()
+    chunks = [_chunk(texto="O prazo de entrega padrão é de 30 dias úteis.")]
+    index.indexar_chunks(conexao, chunks, embeddings=[[1.0, 0.0, 0.0]], nome_modelo="modelo-a")
+
+    avisos = []
+    resultados = index.buscar_hibrido(
+        conexao,
+        "entrega",
+        embeddar_consulta_fn=_embeddar_consulta_fixa([1.0, 0.0]),
+        nome_modelo="modelo-b",
+        dimensao=2,
+        avisos=avisos,
+    )
+
+    assert [r["ordem"] for r in resultados] == [0]
+    assert "docserver ingest --limpar" in avisos[0]

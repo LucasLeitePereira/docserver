@@ -79,12 +79,35 @@ class ErroModeloDivergente(Exception):
     """O índice vetorial foi construído com um modelo/dimensão diferente do atual."""
 
 
+# Quanto uma conexão espera por um lock antes de falhar com "database is locked".
+# O padrão do sqlite3 (5 s) é curto para uma reingestão gravando milhares de chunks.
+TIMEOUT_LOCK_SEGUNDOS = 30.0
+
+
 def criar_indice(caminho: str, compartilhada: bool = False) -> sqlite3.Connection:
     """Abre (ou cria) o banco de índice em `caminho` (use ':memory:' para testes).
 
     `compartilhada=True` libera o uso da conexão a partir de outras threads — o
-    servidor mantém uma única conexão por processo e serializa o acesso com um lock."""
-    conexao = sqlite3.connect(caminho, check_same_thread=not compartilhada)
+    servidor mantém uma única conexão por processo e serializa o acesso com um lock.
+
+    O índice usa WAL: com o journal padrão, a gravação final de uma reingestão
+    (feita pelo `docserver watch` com o servidor no ar) bloqueava as buscas. Em WAL
+    o leitor continua vendo o índice anterior até o commit, e o escritor não espera
+    os leitores. O modo fica gravado no arquivo, que passa a ter `-wal` e `-shm` ao
+    lado enquanto há conexões abertas."""
+    conexao = sqlite3.connect(caminho, timeout=TIMEOUT_LOCK_SEGUNDOS, check_same_thread=not compartilhada)
+    if caminho != ":memory:":
+        try:
+            conexao.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as erro:
+            conexao.close()
+            # o `-shm` do WAL não é compartilhado entre containers (nem entre host e
+            # container) num bind mount do Docker Desktop: o segundo a abrir falha aqui
+            raise sqlite3.OperationalError(
+                f"{erro}: {caminho}. Se o índice já está aberto por outro container ou "
+                "pelo host, rode o comando no mesmo container do servidor "
+                "(docker compose exec docserver-http ...) — ver docs/DEPLOY.md."
+            ) from erro
     conexao.execute(_ESQUEMA)
     conexao.commit()
     return conexao
@@ -126,6 +149,15 @@ def _tabela_vetorial_existe(conexao: sqlite3.Connection) -> bool:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
     ).fetchone()
     return linha is not None
+
+
+def _tem_vetores(conexao: sqlite3.Connection) -> bool:
+    """Há vetores para consultar. A tabela existir não basta: um índice antigo pode
+    tê-la vazia, e consultá-la carregaria o modelo de embeddings à toa."""
+    if not _tabela_vetorial_existe(conexao):
+        return False
+    _carregar_extensao_vec(conexao)
+    return conexao.execute("SELECT 1 FROM chunks_vec LIMIT 1").fetchone() is not None
 
 
 def _garantir_tabela_vetorial(conexao: sqlite3.Connection, dimensao: int) -> None:
@@ -207,7 +239,14 @@ def reindexar(
     if _tabela_vetorial_existe(conexao):
         # conexão nova não conhece o módulo vec0 até a extensão ser carregada
         _carregar_extensao_vec(conexao)
-        conexao.execute("DELETE FROM chunks_vec")
+        if embeddings:
+            conexao.execute("DELETE FROM chunks_vec")
+        else:
+            # ingestão sem embeddings sobre um índice vetorial: o índice passa a ser
+            # só léxico. Mantida a tabela e o modelo registrado, a busca tentaria
+            # carregar o modelo (que pode nem estar instalado) para nada.
+            conexao.execute("DROP TABLE chunks_vec")
+            conexao.execute("DROP TABLE IF EXISTS metadados_indice")
     indexar_chunks(conexao, chunks, embeddings=embeddings, nome_modelo=nome_modelo)
 
 
@@ -433,7 +472,11 @@ def buscar_hibrido(
     nome_modelo: str | None = None,
     dimensao: int | None = None,
     origem: str | None = None,
+    avisos: list[str] | None = None,
 ) -> list[dict]:
+    """Busca híbrida (BM25 + vetorial, fundidas por RRF). Se a parte vetorial não
+    puder rodar (modelo não instalado ou diferente do usado no índice), devolve só a
+    léxica e acrescenta o motivo em `avisos`, para quem chamou repassar ao usuário."""
     peso_lexico = float(os.environ.get("PESO_LEXICO", 1.0))
     peso_vetorial = float(os.environ.get("PESO_VETORIAL", 1.0))
     cobertura_minima = float(os.environ.get("COBERTURA_LEXICA_MINIMA", COBERTURA_LEXICA_MINIMA_PADRAO))
@@ -450,7 +493,7 @@ def buscar_hibrido(
             if _relevante(item, ids_lexicos, pesos, cobertura_minima, similaridade_minima)
         ]
 
-    if not _tabela_vetorial_existe(conexao):
+    if not _tem_vetores(conexao):
         logger.warning(
             "índice vetorial ausente — busca híbrida caindo para busca léxica (BM25) pura"
         )
@@ -459,15 +502,24 @@ def buscar_hibrido(
     if peso_vetorial == 0:
         return _filtrar(lexico)[:limite]
 
-    vetorial = buscar_vetorial(
-        conexao,
-        consulta,
-        limite=20,
-        embeddar_consulta_fn=embeddar_consulta_fn,
-        nome_modelo=nome_modelo,
-        dimensao=dimensao,
-        origem=origem,
-    )
+    try:
+        vetorial = buscar_vetorial(
+            conexao,
+            consulta,
+            limite=20,
+            embeddar_consulta_fn=embeddar_consulta_fn,
+            nome_modelo=nome_modelo,
+            dimensao=dimensao,
+            origem=origem,
+        )
+    except (ImportError, OSError, ErroModeloDivergente) as erro:
+        # ImportError: sem a extra `embeddings`; OSError: modelo fora do cache e sem
+        # rede; ErroModeloDivergente: índice feito com outro modelo.
+        aviso = f"busca vetorial indisponível, resultados só da busca léxica: {erro}"
+        logger.warning(aviso)
+        if avisos is not None:
+            avisos.append(aviso)
+        return _filtrar(lexico)[:limite]
     similaridades = {item["id"]: _distancia_para_similaridade(item["distancia"]) for item in vetorial}
     for item in vetorial:
         item["similaridade"] = similaridades[item["id"]]

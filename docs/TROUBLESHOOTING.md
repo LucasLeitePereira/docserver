@@ -104,6 +104,15 @@ hoje: rode o PDF por uma ferramenta de OCR externa antes de colocá-lo em
 - Teste o comando exato da configuração a partir de outro diretório
   (ex.: `cd ~ && /caminho/.venv/bin/docserver --indice ... serve`). Ele deve
   ficar parado esperando entrada — se sair com erro, o cliente também falha.
+- Conexão recusada por timeout (no Claude Code, `connection timed out after
+  30000ms`): o servidor precisa responder ao `initialize` em poucos segundos.
+  Versões anteriores carregavam o modelo de embeddings (70 s ou mais) antes de
+  atender; a atual carrega em segundo plano. Se persistir, confira se o
+  comando não está esperando outra coisa (rede, permissão do antivírus) e
+  meça o tempo da primeira resposta.
+- Servidor em Docker via stdio: o container não pode ter TTY (`-T` no
+  `docker compose run`, sem `tty: true` no compose), senão as mensagens
+  JSON-RPC chegam corrompidas. Ver `docs/DEPLOY.md`.
 
 ## O agente ignora as ferramentas e responde de memória
 
@@ -128,6 +137,8 @@ hoje: rode o PDF por uma ferramenta de OCR externa antes de colocá-lo em
   imediatamente (bind mount), mas você ainda precisa rodar
   `docker compose run --rm docserver docserver ingest` para reindexar — o
   container não observa mudanças automaticamente (ver "Fase futura").
+  O `docserver-http` mantém o índice aberto: depois de reingerir, ele já
+  responde com o índice novo, sem reiniciar.
 - Se o container foi construído com `--build-arg COM_EMBEDDINGS=false`, o
   índice vetorial nunca é criado — isso é esperado, não um bug; a busca cai
   para BM25 puro e registra um aviso no log.
