@@ -421,6 +421,7 @@ somada aos ajustes encontrados ao testar o `docserver watch`.
 - **Contexto:** `tty: true` converte `\n` em `\r\n` e corrompe o JSON-RPC via stdio. `docs/DEPLOY.md` ainda diz que HTTP "está fora de escopo", mas o modo HTTP já existe.
 - **Critérios de aceite:** compose com `stdin_open: true` sem TTY (ou serviço HTTP com porta publicada); cliente MCP conecta ao container; `DEPLOY.md` corrigido.
 - **Andamento (2026-10-18):** compose sem `tty`, com serviço opcional `docserver-http` (profile `http`, `127.0.0.1:8765`); `DEPLOY.md` corrigido; o Dockerfile passou a baixar também o reranker padrão no build (a imagem roda com `HF_HUB_OFFLINE=1`). Falta: `docker compose build` do zero, `ingest`/`search` no container e handshake via `compose run --rm -T` sem `\r`. O build falhou com `No space left on device` e o daemon do Docker Desktop parou de responder.
+- **Bloqueio (2026-10-18):** o Docker Desktop desta máquina ficou quebrado (API com erro 500 e o instalador/updater preso numa atualização, encerrado à força). Próximo passo: reiniciar o PC, conferir `docker version` (se seguir quebrado, reinstalar o Docker Desktop), liberar espaço com `docker builder prune` e rodar a verificação acima. Roteiro completo em [`sessoes/2026-10-18-integracao-e-docker.md`](sessoes/2026-10-18-integracao-e-docker.md).
 
 ### TASK-030 · Lockfile e limites superiores de versão nas dependências
 - **Prioridade:** 🟡 Média · **Esforço:** P · **Tipo:** infra · **Status:** Backlog
