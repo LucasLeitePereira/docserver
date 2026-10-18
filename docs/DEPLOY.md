@@ -30,14 +30,39 @@ Para uma imagem mais leve, sem a camada vetorial (só BM25):
 docker compose build --build-arg COM_EMBEDDINGS=false
 ```
 
-**Limitação conhecida:** o transporte MCP usado aqui é stdio, e stdio
-dentro de um container tem atrito em alguns clientes MCP (o cliente precisa
-saber rodar `docker compose run` como se fosse o comando do servidor, o que
-nem todo cliente suporta configurar facilmente). O transporte HTTP resolveria
-isso, mas está fora de escopo desta versão (ver `docs/ARQUITETURA.md`). Para
-uso com um cliente MCP local, a instalação direta (sem Docker) tende a ser
-mais simples; Docker é mais adequado para ingestão/validação em CI ou numa
-VM/Codespace compartilhada.
+### Servidor MCP no container
+
+Há dois modos, e ambos já existem no `docserver serve`:
+
+- **stdio** (serviço `docserver`): o cliente MCP executa
+  `docker compose run --rm -T docserver docserver serve` como comando do
+  servidor. O compose não usa `tty`: o TTY converte `\n` em `\r\n` e corrompe o
+  JSON-RPC. Em `docker run` manual, use `-i` sem `-t`; com `compose run`, use `-T`.
+- **HTTP** (serviço `docserver-http`, profile `http`):
+  `docker compose --profile http up docserver-http` publica o servidor em
+  `http://localhost:8765/mcp`, só no loopback do host. Não há autenticação
+  (TASK-010): não publique a porta em outras interfaces.
+
+### Sem chamadas de rede no startup
+
+O `docserver serve` e o `server-mcp` definem, antes de importar o FastMCP e o
+`sentence_transformers` (sem sobrescrever o que você já exportou):
+
+| Variável | Padrão no `serve` | Efeito |
+|---|---|---|
+| `HF_HUB_DISABLE_TELEMETRY` | `1` | desliga a telemetria do Hugging Face |
+| `FASTMCP_CHECK_FOR_UPDATES` | `off` | desliga a consulta ao PyPI no banner |
+| `HF_HUB_OFFLINE` | `1` | usa só os modelos em cache, sem consultar o Hub |
+| `DOCSERVER_PERMITIR_DOWNLOAD` | (não definida) | com `1`, o `serve` não força `HF_HUB_OFFLINE`, para baixar um modelo novo |
+
+O `docker-compose.yml` registra as três primeiras. Para baixar um modelo novo
+(por exemplo ao trocar `RERANKER`), suba uma vez com `HF_HUB_OFFLINE=0`
+(`docker compose run --rm -e HF_HUB_OFFLINE=0 docserver docserver search "x"`)
+ou, fora do Docker, com `DOCSERVER_PERMITIR_DOWNLOAD=1`.
+
+Docker é adequado para ingestão/validação em CI ou numa VM/Codespace
+compartilhada; para um cliente MCP local, a instalação direta costuma ser mais
+simples.
 
 ## Codespaces / VM
 

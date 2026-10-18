@@ -1,4 +1,6 @@
 services:
+  # Modo stdio: o cliente MCP roda `docker compose run --rm -T docserver docserver serve`.
+  # Sem `tty`: o TTY converte \n em \r\n e corrompe o JSON-RPC do protocolo.
   docserver:
     build:
       context: .
@@ -9,4 +11,29 @@ services:
       - ./docs-normalizado:/app/docs-normalizado
       - ./data:/app/data
     stdin_open: true
-    tty: true
+    environment:
+      # sem chamadas de rede no startup do servidor (os modelos já estão na imagem);
+      # para baixar um modelo novo, troque para DOCSERVER_PERMITIR_DOWNLOAD: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      FASTMCP_CHECK_FOR_UPDATES: "off"
+      HF_HUB_OFFLINE: "1"
+
+  # Modo HTTP: `docker compose --profile http up docserver-http` e conecte em
+  # http://localhost:8765/mcp. Sem autenticação: não exponha fora de localhost.
+  docserver-http:
+    profiles: ["http"]
+    build:
+      context: .
+      args:
+        COM_EMBEDDINGS: "true"
+    command: ["docserver", "serve", "--http", "--host", "0.0.0.0", "--porta", "8765"]
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./docs-fonte:/app/docs-fonte
+      - ./docs-normalizado:/app/docs-normalizado
+      - ./data:/app/data
+    environment:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      FASTMCP_CHECK_FOR_UPDATES: "off"
+      HF_HUB_OFFLINE: "1"
