@@ -231,6 +231,98 @@ processos: num bind mount do Docker Desktop, dois containers (ou host e
 container) não conseguem abrir o mesmo índice ao mesmo tempo (ver
 `docs/DEPLOY.md`).
 
+### Conhecimento revisado, não código
+
+**Contexto.** Os agentes que trabalham num projeto redescobrem, a cada sessão,
+as mesmas decisões e armadilhas, e isso custa tokens. A ideia é o projeto
+acumular o que os agentes aprendem e devolvê-lo por `buscar`. A pesquisa que
+embasa o desenho, porém, avisa que a ideia só funciona sob quatro condições:
+
+- Arquivos de contexto **gerados por LLM** reduziram o sucesso das tarefas
+  (−0,5% a −2%) e aumentaram o custo em ~20%; os escritos por humanos ajudaram
+  ~4%. Os gerados falham porque repetem o que o repositório já documenta
+  (sem a documentação existente, passam a ajudar) e visões gerais do código não
+  ajudaram a achar arquivos mais rápido
+  ([AGENTS.md, arXiv 2602.11988](https://arxiv.org/html/2602.11988v1)).
+- A equipe do Claude Code trocou a busca vetorial por grep/glob para explorar
+  **código**, porque funcionou melhor
+  ([relato](https://officechai.com/ai/claude-researcher-explains-how-agentic-search-performed-better-than-rag-for-code-generation/)).
+- A Anthropic recomenda notas persistidas fora do contexto e recuperação **sob
+  demanda**; contexto sempre carregado custa tokens em todo turno
+  ([context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)).
+- Agentes reproduzem e amplificam erros das memórias que recuperam
+  ([arXiv 2505.16067](https://arxiv.org/html/2505.16067v2)), e um LLM-juiz
+  favorece texto do próprio modelo ou da mesma família
+  ([NeurIPS 2024](https://neurips.cc/virtual/2024/106181)).
+
+**Decisão.**
+
+1. **Indexar só conhecimento, nunca o código.** Entram decisões e o porquê,
+   armadilhas e seus sintomas, convenções não óbvias e procedimentos de operação
+   (`tipo`: `decisao`, `armadilha`, `convencao`, `operacao`). "Este módulo faz X"
+   fica de fora: o código se lê com grep e glob, e o revisor rejeita o que for
+   redundante.
+2. **Quarentena e revisor de outro modelo.** O agente escreve em
+   `_pendentes/`, que a ingestão e o watcher ignoram; só o que o revisor aprova
+   vai para `conhecimento/` e para o índice. O revisor deveria ser um modelo
+   diferente do autor, e o comando dele é configurável (`[revisor].comando`) para
+   permitir até outra família de modelos. Quando o modelo é o mesmo, a revisão
+   roda e avisa do viés de autopreferência. Toda decisão é assinada no front
+   matter e registrada em `_revisoes.jsonl`.
+3. **Recuperação sob demanda, CLAUDE.md mínimo.** O conhecimento chega pela tool
+   `buscar` (as `instructions` do servidor MCP e um bloco curto no `CLAUDE.md`
+   mandam buscar antes de investigar). O "como documentar" vira uma skill,
+   carregada só quando usada.
+4. **Léxico por padrão.** O `.docserver.toml` gerado pelo `docserver init` traz
+   `embeddings = false`. Nossa avaliação não mostra ganho do híbrido sobre o
+   léxico (100% nos dois perfis, ver "Avaliação de qualidade de busca"), o agente
+   reformula as consultas sozinho, e sem embeddings a imagem do container fica
+   ~2,5 GB menor e a sessão stdio não paga a carga do modelo. Os embeddings
+   continuam opcionais.
+
+Fluxo (detalhes de uso em `docs/AGENTES.md`):
+
+```text
+agente escreve docs/_pendentes/x.md
+  -> watcher (debounce de 10 s) dispara `docserver revisar`
+       -> checagens baratas, sem LLM (front matter, segredos, nome já usado, tentativas)
+       -> revisor (comando configurável, só leitura)
+            |- aprovar / ajustar -> docs/conhecimento/x.md, assinado
+            |                       -> o evento do arquivo novo dispara a ingestão
+            `- rejeitar          -> docs/_rejeitados/x.md, com os motivos
+  -> `buscar` encontra o documento aprovado
+```
+
+**Consequências.**
+
+- A economia de tokens é plausível, **mas não está comprovada**. O harness em
+  `avaliacao/tokens/` mede o custo com e sem o MCP, e o mecanismo só se mantém
+  se o custo médio cair sem cair a taxa de sucesso (ver
+  `avaliacao/tokens/README.md`).
+- Cada documento custa uma chamada ao revisor (o `custo_usd` fica no registro,
+  quando o revisor informa), e o conhecimento só fica buscável depois da revisão.
+- Documento que o revisor não consegue avaliar (JSON inválido, tempo esgotado,
+  código de saída diferente de zero) fica em `_pendentes/`: na dúvida, não indexa.
+- Um segredo que passe pelas checagens e pelo revisor entra no índice; a revisão
+  reduz o risco, não o elimina.
+- O WAL do índice usa memória compartilhada (`-shm`): dois containers, ou host e
+  container, não abrem o mesmo índice em bind mount do Docker Desktop. Já está
+  descrito acima ("Watcher como processo separado") e em `docs/DEPLOY.md`;
+  por isso o desenho é um índice por projeto, dentro do container.
+
+**Alternativas descartadas.**
+
+- *Indexar o código também*: a busca vetorial perdeu para grep/glob na
+  exploração de código, e o índice envelheceria a cada commit.
+- *Colar o conhecimento no `CLAUDE.md`*: custa tokens em todo turno, sem filtro
+  por relevância.
+- *Indexar o que o agente escreve direto*: sem revisão, erros viram "memória" que
+  os agentes repetem e amplificam.
+- *Revisor sempre do mesmo modelo do autor*: o viés de autopreferência favorece o
+  texto de quem escreveu; por isso o modelo e o comando do revisor são
+  configuráveis.
+- *Embeddings por padrão*: custo de imagem e de carga sem ganho medido.
+
 ## Fase futura
 
 Deliberadamente fora de escopo nesta versão (ver seção 12 do plano original):

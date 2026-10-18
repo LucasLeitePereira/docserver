@@ -194,3 +194,77 @@ def test_extrair_pdf_desliga_o_ocr_do_pymupdf4llm(tmp_path, monkeypatch):
     extract.extrair_texto(origem)
 
     assert chamadas == [{"use_ocr": False}]
+
+
+def test_ler_front_matter_aceita_crlf_e_bom():
+    conteudo = "\ufeff---\r\ntitulo: Guia\r\ntipo: decisao\r\n---\r\n\r\n# Guia\r\n"
+
+    meta, corpo = extract.ler_front_matter(conteudo)
+
+    assert meta == {"titulo": "Guia", "tipo": "decisao"}
+    assert corpo == "# Guia\n"
+
+
+def test_ler_front_matter_bloco_nao_fechado_nao_e_front_matter():
+    conteudo = "---\ntitulo: Guia\n\n# Guia\n"
+
+    meta, corpo = extract.ler_front_matter(conteudo)
+
+    assert meta == {}
+    assert corpo == conteudo
+
+
+def test_ler_front_matter_valor_pode_conter_dois_pontos():
+    meta, _ = extract.ler_front_matter("---\ntitulo: Nota: WAL e locks\narquivos: a.py, b.py\n---\ncorpo\n")
+
+    assert meta["titulo"] == "Nota: WAL e locks"
+    assert meta["arquivos"] == "a.py, b.py"
+
+
+def _normalizar_md(tmp_path, texto, nome_fonte="docs-fonte"):
+    docs_fonte = tmp_path / nome_fonte
+    docs_normalizado = tmp_path / "docs-normalizado"
+    docs_fonte.mkdir()
+    origem = docs_fonte / "nota.md"
+    origem.write_text(texto, encoding="utf-8")
+    return extract.normalizar(origem, docs_fonte, docs_normalizado), docs_normalizado
+
+
+def test_normalizar_md_com_front_matter_proprio_gera_um_unico_bloco(tmp_path):
+    texto = (
+        "---\norigem: outro/lugar.md\ntitulo: Por que WAL\ntipo: decisao\n"
+        "gerado_por: claude-opus-5-5\narquivos: src/a.py, docs/b.md\n---\n\n# Por que WAL\n\nCorpo.\n"
+    )
+
+    saida, _ = _normalizar_md(tmp_path, texto)
+
+    conteudo = saida.read_text(encoding="utf-8")
+    meta, corpo = extract.ler_front_matter(conteudo)
+    assert conteudo.count("---\n") == 2
+    assert meta["origem"] == "docs-fonte/nota.md"  # a do docserver vence
+    assert meta["titulo"] == "Por que WAL"  # o do autor vence
+    assert meta["tipo"] == "decisao"
+    assert meta["gerado_por"] == "claude-opus-5-5"
+    assert meta["arquivos"] == "src/a.py, docs/b.md"
+    assert "extrator" in meta and "ingerido_em" in meta
+    assert "gerado_por" not in corpo
+    assert corpo.startswith("# Por que WAL")
+
+
+def test_front_matter_de_agente_nao_vira_texto_indexado(tmp_path):
+    texto = "---\ntipo: armadilha\ngerado_por: claude\n---\n\n# Armadilha\n\nTexto da armadilha com conteúdo suficiente para virar chunk.\n"
+    saida, docs_normalizado = _normalizar_md(tmp_path, texto)
+
+    from docserver import chunk
+
+    chunks = chunk.chunkar_arquivo(saida, docs_normalizado, contar_tokens_fn=lambda t: len(t.split()))
+
+    assert chunks
+    assert all("gerado_por:" not in c["texto"] and "tipo:" not in c["texto"] for c in chunks)
+
+
+def test_origem_usa_o_nome_real_da_pasta_de_origem(tmp_path):
+    saida, _ = _normalizar_md(tmp_path, "# Nota\n\nTexto.\n", nome_fonte="docs")
+
+    meta, _ = extract.ler_front_matter(saida.read_text(encoding="utf-8"))
+    assert meta["origem"] == "docs/nota.md"

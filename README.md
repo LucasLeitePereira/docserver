@@ -371,7 +371,7 @@ Variante léxica (máquina fraca ou pedido do usuário): `VENV_PY -m pip install
 A instalação com embeddings pode levar vários minutos; use um timeout longo.
 
 - **Verificação:** `DOCSERVER --help` lista os subcomandos `ingest`, `watch`,
-  `search`, `avaliar`, `serve`, `server-mcp` e `stats`.
+  `search`, `avaliar`, `serve`, `server-mcp`, `init`, `revisar` e `stats`.
 
 ### Etapa 4 — documentos
 
@@ -457,7 +457,7 @@ Informe ao usuário:
 
 - [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) — decisões de design e o porquê de cada uma
 - [`docs/INGESTAO.md`](docs/INGESTAO.md) — como adicionar documentos e formatos suportados
-- [`docs/AGENTES.md`](docs/AGENTES.md) — como conectar um cliente MCP
+- [`docs/AGENTES.md`](docs/AGENTES.md) — como conectar um cliente MCP e o fluxo de conhecimento revisado (`docserver init`, `docserver revisar`)
 - [`docs/DEPLOY.md`](docs/DEPLOY.md) — rodar local, Docker, Codespaces, roteiro de demonstração
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — problemas comuns e como resolvê-los
 

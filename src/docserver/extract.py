@@ -141,11 +141,21 @@ def extrair_texto(caminho: Path) -> str | None:
 
 
 def ler_front_matter(conteudo: str) -> tuple[dict[str, str], str]:
-    """Separa o front matter YAML (formato chave: valor simples) do corpo Markdown."""
+    """Separa o front matter (formato `chave: valor` simples) do corpo Markdown.
+
+    Tolera BOM e CRLF (arquivos salvos no Windows) e devolve o corpo já com `\n`.
+    Um bloco aberto e nunca fechado não é front matter: devolve `{}` e o texto
+    inteiro, em vez de quebrar a ingestão do arquivo."""
+    conteudo = conteudo.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     if not conteudo.startswith("---\n"):
         return {}, conteudo
 
-    fim = conteudo.index("\n---\n", 4)
+    fim = conteudo.find("\n---\n", 3)
+    if fim == -1 and conteudo.endswith("\n---"):
+        fim = len(conteudo) - 4
+        conteudo += "\n"
+    if fim == -1:
+        return {}, conteudo
     bloco = conteudo[4:fim]
     corpo = conteudo[fim + len("\n---\n") :]
     if corpo.startswith("\n"):
@@ -194,18 +204,25 @@ def normalizar(caminho_origem: Path, docs_fonte: Path, docs_normalizado: Path) -
     caminho_saida = caminho_normalizado_para(caminho_origem, docs_fonte, docs_normalizado)
     caminho_saida.parent.mkdir(parents=True, exist_ok=True)
 
-    origem_str = f"docs-fonte/{caminho_relativo.as_posix()}"
+    # Nome real da pasta de origem (não um "docs-fonte/" fixo): é o que o agente vê e
+    # cita. Com `--docs-fonte .` o nome é vazio, então resolve antes de pegar o nome.
+    nome_fonte = docs_fonte.name or docs_fonte.resolve().name
+    origem_str = f"{nome_fonte}/{caminho_relativo.as_posix()}" if nome_fonte else caminho_relativo.as_posix()
     extrator = EXTRATORES[caminho_origem.suffix.lower()].__name__
     if caminho_origem.suffix.lower() == ".pdf":
         extrator = _ultimo_extrator_pdf
     ingerido_em = _dt.datetime.now().isoformat(timespec="seconds")
 
-    front_matter = (
-        "---\n"
-        f"origem: {origem_str}\n"
-        f"extrator: {extrator}\n"
-        f"ingerido_em: {ingerido_em}\n"
-        "---\n\n"
-    )
+    # Um .md que já traz front matter (escrito por agente: tipo, gerado_por, ...) tem o
+    # bloco separado do corpo e mesclado ao nosso, para sair um bloco só — antes o
+    # original virava texto indexado. As chaves que o docserver calcula vencem as da
+    # origem (um `origem:` copiado de outro lugar estaria errado); `titulo` é do autor.
+    meta_origem, texto = ler_front_matter(texto)
+    meta = {"origem": origem_str, "extrator": extrator, "ingerido_em": ingerido_em}
+    for chave, valor in meta_origem.items():
+        if chave not in meta:
+            meta[chave] = valor
+
+    front_matter = "---\n" + "".join(f"{chave}: {valor}\n" for chave, valor in meta.items()) + "---\n\n"
     caminho_saida.write_text(front_matter + texto, encoding="utf-8")
     return caminho_saida

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import fnmatch
 import sys
 import time
 from pathlib import Path
 
-from docserver import chunk, embed, extract, index
+from docserver import chunk, config, embed, extract, index, init, lock, revisao
 
-DOCS_FONTE_PADRAO = Path("docs-fonte")
-DOCS_NORMALIZADO_PADRAO = Path("docs-normalizado")
-INDICE_PADRAO = "data/indice.db"
+# os padrões vivem em config.py; os nomes antigos continuam disponíveis aqui
+DOCS_FONTE_PADRAO = config.DOCS_FONTE_PADRAO
+DOCS_NORMALIZADO_PADRAO = config.DOCS_NORMALIZADO_PADRAO
+INDICE_PADRAO = config.INDICE_PADRAO
 
 # `server-mcp` não aceita caminhos: usa sempre os do próprio projeto, independente do
 # diretório de onde o comando é executado (instalação editável, layout src/).
@@ -34,8 +37,35 @@ class ErroIngestao(Exception):
     """A ingestão foi abortada antes de alterar docs-normalizado ou o índice."""
 
 
-def _deve_ignorar(caminho: Path) -> bool:
-    return caminho.name.startswith(".") or caminho.name.startswith("~$")
+def _relativo(caminho: Path, docs_fonte: Path) -> Path | None:
+    """`caminho` relativo a `docs_fonte`, ou None se estiver fora dela. Tenta primeiro
+    como veio e depois com os dois resolvidos (eventos do watcher e argumentos da CLI
+    podem misturar caminhos relativos e absolutos)."""
+    try:
+        return Path(caminho).relative_to(docs_fonte)
+    except ValueError:
+        pass
+    try:
+        return Path(caminho).resolve().relative_to(Path(docs_fonte).resolve())
+    except (ValueError, OSError):
+        return None
+
+
+def _deve_ignorar(caminho: Path, docs_fonte: Path, padroes: tuple[str, ...] = ()) -> bool:
+    """Regras de ignorar da ingestão e do watcher, sobre o caminho relativo a `docs_fonte`:
+    parte oculta em qualquer nível (pasta ou arquivo), temporário `~$` do Office, ou
+    padrão de `ignorar` (fnmatch) casando com o caminho ou com uma pasta ancestral dele —
+    assim `_pendentes` e `_pendentes/*` ignoram a pasta inteira. Fora de `docs_fonte`,
+    só o nome do arquivo conta."""
+    relativo = _relativo(caminho, docs_fonte)
+    if relativo is None:
+        nome = Path(caminho).name
+        return nome.startswith(".") or nome.startswith("~$")
+    partes = relativo.parts
+    if any(parte.startswith(".") for parte in partes) or partes[-1].startswith("~$"):
+        return True
+    candidatos = ["/".join(partes[:i]) for i in range(1, len(partes) + 1)]
+    return any(fnmatch.fnmatchcase(c, padrao) for padrao in padroes for c in candidatos)
 
 
 def validar_docs_fonte(docs_fonte: Path) -> None:
@@ -92,11 +122,37 @@ def executar_ingestao(
     embeddar_passagens_fn=None,
     nome_modelo: str | None = None,
     forcar: bool = False,
+    ignorar: tuple[str, ...] = (),
+    espera_lock_s: float = 300.0,
+    ao_aguardar_lock=None,
 ) -> dict:
-    """Pipeline completo. Levanta `ErroIngestao` — sem tocar em docs-normalizado nem
-    no índice — se `docs_fonte` não existe, ou (a menos que `forcar`) se não há nenhum
-    arquivo suportado ou se o resultado esvaziaria um índice que tinha conteúdo."""
+    """Pipeline completo, sob o lock de ingestão do índice (só uma ingestão por vez).
+    Levanta `ErroIngestao` — sem tocar em docs-normalizado nem no índice — se `docs_fonte`
+    não existe, se o lock não liberou em `espera_lock_s`, ou (a menos que `forcar`) se não há
+    nenhum arquivo suportado ou se o resultado esvaziaria um índice que tinha conteúdo."""
     validar_docs_fonte(docs_fonte)
+    if caminho_indice == ":memory:":
+        return _ingerir(docs_fonte, docs_normalizado, caminho_indice, sem_embeddings,
+                        embeddar_passagens_fn, nome_modelo, forcar, ignorar)
+    try:
+        with lock.travar(
+            lock.caminho_lock(Path(caminho_indice)),
+            espera_s=espera_lock_s,
+            ao_aguardar=ao_aguardar_lock,
+        ):
+            return _ingerir(docs_fonte, docs_normalizado, caminho_indice, sem_embeddings,
+                            embeddar_passagens_fn, nome_modelo, forcar, ignorar)
+    except lock.LockOcupado as erro:
+        raise ErroIngestao(
+            f"outra ingestão está em andamento e não terminou em {espera_lock_s:g}s ({erro}). "
+            "Nada foi alterado; tente de novo quando ela acabar."
+        ) from erro
+
+
+def _ingerir(
+    docs_fonte, docs_normalizado, caminho_indice, sem_embeddings, embeddar_passagens_fn,
+    nome_modelo, forcar, ignorar,
+) -> dict:
     inicio = time.perf_counter()
     relatorio = {
         "processados": 0,
@@ -110,7 +166,7 @@ def executar_ingestao(
 
     suportados: list[Path] = []
     for caminho in sorted(p for p in docs_fonte.rglob("*") if p.is_file()):
-        if _deve_ignorar(caminho):
+        if _deve_ignorar(caminho, docs_fonte, ignorar):
             continue
         if caminho.suffix.lower() not in extract.EXTRATORES:
             relatorio["ignorados"].append(str(caminho))
@@ -442,6 +498,8 @@ def _comando_ingest(args: argparse.Namespace) -> None:
             args.indice,
             sem_embeddings=args.sem_embeddings,
             forcar=args.forcar,
+            ignorar=args.ignorar,
+            ao_aguardar_lock=lambda: print("aguardando outra ingestão terminar…", file=sys.stderr),
         )
     except ErroIngestao as erro:
         print(f"Ingestão abortada: {erro}", file=sys.stderr)
@@ -449,8 +507,19 @@ def _comando_ingest(args: argparse.Namespace) -> None:
     print(formatar_relatorio(relatorio))
 
 
+def _comando_init(args: argparse.Namespace) -> None:
+    raiz = Path(args.raiz) if args.raiz else Path.cwd()
+    for linha in init.inicializar(raiz, modelo_revisor=args.modelo_revisor):
+        print(linha)
+
+
 def _comando_watch(args: argparse.Namespace) -> None:
     from docserver import watch
+
+    # o watcher costuma rodar com a saída redirecionada para um log (no claude-isolado,
+    # .docserver/watch.log); sem isso, o resumo do revisor fica preso no buffer
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
 
     docs_fonte = Path(args.docs_fonte)
     docs_normalizado = Path(args.docs_normalizado)
@@ -462,6 +531,21 @@ def _comando_watch(args: argparse.Namespace) -> None:
     Path(args.indice).parent.mkdir(parents=True, exist_ok=True)
     docs_normalizado.mkdir(parents=True, exist_ok=True)
 
+    # A revisão automática só existe num projeto com .docserver.toml. O `revisar` passado ao
+    # watcher não ingere: aprovar move o arquivo para fora de _pendentes, e esse evento já
+    # dispara a ingestão normal do watcher.
+    revisar = None
+    pasta_pendentes = None
+    if args.cfg.raiz is not None and not args.sem_revisao:
+        cfg = args.cfg
+        pasta_pendentes = cfg.docs_fonte / cfg.revisor["pendentes"]
+
+        def revisar() -> None:
+            try:
+                _revisar_com_lock(cfg, ingerir=None, espera_s=5.0)
+            except lock.LockOcupado:
+                print("docserver: outra revisão em andamento; os pendentes ficam com ela")
+
     try:
         watch.observar(
             docs_fonte,
@@ -469,9 +553,50 @@ def _comando_watch(args: argparse.Namespace) -> None:
             args.indice,
             sem_embeddings=args.sem_embeddings,
             espera=args.espera,
+            ignorar=args.ignorar,
+            revisar=revisar,
+            pasta_pendentes=pasta_pendentes,
         )
     except KeyboardInterrupt:
         print("docserver: watcher encerrado")
+
+
+def _revisar_com_lock(cfg: config.Config, ingerir, espera_s: float, modelo: str | None = None):
+    """Uma revisão por vez sobre o mesmo índice: watcher e `docserver revisar` manual
+    revisariam o mesmo pendente duas vezes (dois LLMs, duas assinaturas, dois registros)."""
+    caminho = lock.caminho_lock(cfg.indice, "revisao")
+    with lock.travar(caminho, espera_s=espera_s):
+        return revisao.revisar_pendentes(cfg, modelo=modelo, ingerir=ingerir)
+
+
+def _comando_revisar(args: argparse.Namespace) -> None:
+    cfg = args.cfg
+    if cfg.raiz is None:
+        print("Nenhum .docserver.toml encontrado: rode `docserver init` na raiz do projeto.")
+        sys.exit(2)
+
+    def ingerir() -> None:
+        try:
+            relatorio = executar_ingestao(
+                cfg.docs_fonte,
+                cfg.docs_normalizado,
+                str(cfg.indice),
+                sem_embeddings=not cfg.embeddings,
+                ignorar=cfg.ignorar,
+            )
+        except ErroIngestao as erro:
+            print(f"Ingestão abortada: {erro}", file=sys.stderr)
+            return
+        print(formatar_relatorio(relatorio))
+
+    try:
+        caminho = lock.caminho_lock(cfg.indice, "revisao")
+        with lock.travar(caminho, espera_s=0.0):
+            codigo = revisao.executar(args, cfg, ingerir)
+    except lock.LockOcupado:
+        print("Outra revisão já está em andamento (watcher ou outro terminal).", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(codigo)
 
 
 def _comando_search(args: argparse.Namespace) -> None:
@@ -498,9 +623,23 @@ def _comando_search(args: argparse.Namespace) -> None:
 
 def construir_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="docserver")
-    parser.add_argument("--docs-fonte", default=str(DOCS_FONTE_PADRAO))
-    parser.add_argument("--docs-normalizado", default=str(DOCS_NORMALIZADO_PADRAO))
-    parser.add_argument("--indice", default=INDICE_PADRAO)
+    # default None: o valor efetivo (argumento > .docserver.toml > padrão) é resolvido
+    # em `resolver_configuracao`, depois do parse
+    parser.add_argument(
+        "--docs-fonte",
+        default=None,
+        help=f"pasta de origem dos documentos (padrão: {DOCS_FONTE_PADRAO}, ou [docs].fonte do .docserver.toml)",
+    )
+    parser.add_argument(
+        "--docs-normalizado",
+        default=None,
+        help=f"pasta dos .md normalizados (padrão: {DOCS_NORMALIZADO_PADRAO}, ou [docs].normalizado do .docserver.toml)",
+    )
+    parser.add_argument(
+        "--indice",
+        default=None,
+        help=f"arquivo do índice (padrão: {INDICE_PADRAO}, ou [docs].indice do .docserver.toml)",
+    )
     subs = parser.add_subparsers(dest="comando", required=True)
 
     p_ingest = subs.add_parser("ingest", help="roda o pipeline completo de ingestão")
@@ -527,7 +666,18 @@ def construir_parser() -> argparse.ArgumentParser:
         help="segundos sem novas mudanças antes de reingerir (agrupa cópias e salvamentos em lote)",
     )
     p_watch.add_argument("--sem-embeddings", action="store_true")
+    p_watch.add_argument(
+        "--sem-revisao",
+        action="store_true",
+        help="não revisa automaticamente o que for escrito nos pendentes",
+    )
     p_watch.set_defaults(func=_comando_watch)
+
+    p_revisar = subs.add_parser(
+        "revisar", help="passa os documentos pendentes pelo revisor e indexa os aprovados"
+    )
+    revisao.configurar_parser(p_revisar)
+    p_revisar.set_defaults(func=_comando_revisar)
 
     p_search = subs.add_parser("search", help="busca pelo terminal")
     p_search.add_argument("consulta")
@@ -564,13 +714,47 @@ def construir_parser() -> argparse.ArgumentParser:
     )
     p_server_mcp.set_defaults(func=_comando_server_mcp)
 
+    p_init = subs.add_parser("init", help="prepara um projeto: .docserver.toml, pastas, MCP e skill")
+    p_init.add_argument("--raiz", default=None, help="raiz do projeto (padrão: diretório atual)")
+    p_init.add_argument("--modelo-revisor", default="claude-sonnet-5-5")
+    p_init.set_defaults(func=_comando_init)
+
     p_stats = subs.add_parser("stats", help="documentos, chunks, modelo, data da ingestão")
     p_stats.set_defaults(func=_comando_stats)
 
     return parser
 
 
+def resolver_configuracao(args: argparse.Namespace, cfg: config.Config) -> None:
+    """Preenche o que não veio na linha de comando: argumento explícito sempre vence o
+    `.docserver.toml`, que vence o padrão. `embeddings = false` equivale a --sem-embeddings."""
+    if args.docs_fonte is None:
+        args.docs_fonte = str(cfg.docs_fonte)
+    if args.docs_normalizado is None:
+        args.docs_normalizado = str(cfg.docs_normalizado)
+    if args.indice is None:
+        args.indice = str(cfg.indice)
+    if hasattr(args, "sem_embeddings"):
+        args.sem_embeddings = args.sem_embeddings or not cfg.embeddings
+    args.ignorar = cfg.ignorar
+    # a configuração efetiva, com os argumentos da linha de comando aplicados por cima
+    args.cfg = dataclasses.replace(
+        cfg,
+        docs_fonte=Path(args.docs_fonte),
+        docs_normalizado=Path(args.docs_normalizado),
+        indice=Path(args.indice),
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = construir_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    # o `init` roda justamente para gerar ou consertar o .docserver.toml: não depende dele
+    if args.comando != "init":
+        try:
+            cfg = config.carregar()
+        except ValueError as erro:
+            print(f"docserver: configuração inválida: {erro}", file=sys.stderr)
+            sys.exit(2)
+        resolver_configuracao(args, cfg)
     args.func(args)

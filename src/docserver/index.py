@@ -275,6 +275,12 @@ def _sem_prefixo(caminho: str, prefixo: str) -> str:
     return caminho[len(prefixo) :] if caminho.startswith(prefixo) else caminho
 
 
+def _sem_pasta_raiz(caminho: str) -> str:
+    """Tira a primeira pasta (a pasta de origem gravada em `origem`, que pode ter
+    qualquer nome: `docs-fonte/`, `docs/`...). Sem pasta, devolve o caminho."""
+    return caminho.split("/", 1)[1] if "/" in caminho else caminho
+
+
 def _casa_caminho(relativo: str, alvo: str) -> bool:
     nome = relativo.rsplit("/", 1)[-1]
     return relativo == alvo or relativo.endswith("/" + alvo) or nome == alvo or Path(nome).stem == alvo
@@ -294,7 +300,11 @@ def resolver_documento(conexao: sqlite3.Connection, documento: str) -> list[tupl
     ).fetchall()
     candidatos = []
     for origem, normalizado in pares:
-        if _casa_caminho(_sem_prefixo(origem, "docs-fonte/"), alvo) or _casa_caminho(normalizado, alvo):
+        if (
+            _casa_caminho(origem, alvo)
+            or _casa_caminho(_sem_pasta_raiz(origem), alvo)
+            or _casa_caminho(normalizado, alvo)
+        ):
             candidatos.append((origem, normalizado))
     return candidatos
 

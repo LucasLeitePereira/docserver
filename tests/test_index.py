@@ -184,3 +184,20 @@ def test_reingestao_grava_enquanto_uma_busca_le_o_indice_anterior(tmp_path):
     finally:
         leitor.close()
         escritor.close()
+
+
+def test_resolver_documento_encontra_origem_com_prefixo_de_pasta_qualquer(conn):
+    index.indexar_chunks(
+        conn,
+        [_chunk(caminho_origem="docs/conhecimento/x.md", caminho_normalizado="conhecimento/x.md")],
+    )
+
+    for pedido in ("docs/conhecimento/x.md", "conhecimento/x.md", "x.md", "x"):
+        assert index.resolver_origem(conn, pedido) == ["docs/conhecimento/x.md"], pedido
+
+
+def test_resolver_documento_mantem_prefixo_docs_fonte(conn):
+    index.indexar_chunks(conn, [_chunk(caminho_origem="docs-fonte/api/c.md", caminho_normalizado="api/c.md")])
+
+    assert index.resolver_origem(conn, "docs-fonte/api/c.md") == ["docs-fonte/api/c.md"]
+    assert index.resolver_origem(conn, "api/c.md") == ["docs-fonte/api/c.md"]
