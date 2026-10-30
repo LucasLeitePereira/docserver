@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pytest
 
 from docserver import cli
@@ -520,6 +523,33 @@ def test_ingestao_ignora_pasta_pendentes(tmp_path):
 
     assert relatorio["processados"] == 1
     assert not (tmp_path / "norm" / "_pendentes").exists()
+
+
+def test_listar_arquivos_nao_desce_em_pasta_ignorada(tmp_path, monkeypatch):
+    # fonte na raiz de um projeto: `target/` pode ter centenas de milhares de arquivos
+    docs_fonte = tmp_path
+    (docs_fonte / "target" / "debug").mkdir(parents=True)
+    (docs_fonte / "target" / "debug" / "x.md").write_text("x", encoding="utf-8")
+    (docs_fonte / ".git").mkdir()
+    (docs_fonte / ".git" / "y.md").write_text("y", encoding="utf-8")
+    (docs_fonte / "docs").mkdir()
+    (docs_fonte / "docs" / "ok.md").write_text("ok", encoding="utf-8")
+    (docs_fonte / "LEIA.md").write_text("leia", encoding="utf-8")
+
+    visitadas = []
+    walk_original = os.walk
+
+    def walk_espiao(raiz, *a, **kw):
+        for item in walk_original(raiz, *a, **kw):
+            visitadas.append(Path(item[0]).relative_to(docs_fonte).as_posix())
+            yield item
+
+    monkeypatch.setattr(cli.os, "walk", walk_espiao)
+    arquivos = cli._listar_arquivos(docs_fonte, ("target",))
+
+    assert {p.relative_to(docs_fonte).as_posix() for p in arquivos} == {"LEIA.md", "docs/ok.md"}
+    assert arquivos == sorted(arquivos)
+    assert not any(v.startswith(("target", ".git")) for v in visitadas)
 
 
 def test_ingestao_com_lock_ocupado_aborta_sem_tocar_em_docs_normalizado(tmp_path):

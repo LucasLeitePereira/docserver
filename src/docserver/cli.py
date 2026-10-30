@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import fnmatch
+import os
 import sys
 import time
 from pathlib import Path
@@ -66,6 +67,21 @@ def _deve_ignorar(caminho: Path, docs_fonte: Path, padroes: tuple[str, ...] = ()
         return True
     candidatos = ["/".join(partes[:i]) for i in range(1, len(partes) + 1)]
     return any(fnmatch.fnmatchcase(c, padrao) for padrao in padroes for c in candidatos)
+
+
+def _listar_arquivos(docs_fonte: Path, padroes: tuple[str, ...] = ()) -> list[Path]:
+    """Arquivos de `docs_fonte` que as regras de ignorar não excluem, em ordem. Poda as
+    pastas ignoradas durante a varredura: com a fonte na raiz de um projeto, um `rglob`
+    descia por `target/` ou `node_modules/` inteiros só para descartar tudo depois."""
+    arquivos: list[Path] = []
+    for raiz, pastas, nomes in os.walk(docs_fonte):
+        base = Path(raiz)
+        pastas[:] = [p for p in pastas if not _deve_ignorar(base / p, docs_fonte, padroes)]
+        arquivos.extend(
+            base / n for n in nomes
+            if (base / n).is_file() and not _deve_ignorar(base / n, docs_fonte, padroes)
+        )
+    return sorted(arquivos)
 
 
 def validar_docs_fonte(docs_fonte: Path) -> None:
@@ -165,9 +181,7 @@ def _ingerir(
     }
 
     suportados: list[Path] = []
-    for caminho in sorted(p for p in docs_fonte.rglob("*") if p.is_file()):
-        if _deve_ignorar(caminho, docs_fonte, ignorar):
-            continue
+    for caminho in _listar_arquivos(docs_fonte, ignorar):
         if caminho.suffix.lower() not in extract.EXTRATORES:
             relatorio["ignorados"].append(str(caminho))
             continue
